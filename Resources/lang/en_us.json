@@ -1,0 +1,19 @@
+{
+  "lang": "en_us",
+  "translations": {
+    "name": "Xcode",
+    "app.title": "Xcode",
+    "app.version": "Version {version}",
+    "action.open": "Open...",
+    "action.clone": "Clone...",
+    "action.new_project": "New Project",
+    "recent.swiftiu": "SwiftIU",
+    "recent.swiftiu_path": "~/Desktop",
+    "recent.tux": "Tux",
+    "recent.tux_path": "~/Desktop/Tux.zip",
+    "recent.tux_zip": "Tux.zip",
+    "recent.tux_zip_path": "~/Desktop",
+    "recent.cmaps": "C Maps",
+    "recent.cmaps_path": "~/Desktop"
+  }
+}

@@ -1,0 +1,15 @@
+[package]
+name = "xcode"
+version = "27.0.0"
+edition = "2021"
+description = "Xcode start page for TontooOS"
+readme = "README.md"
+
+[[bin]]
+name = "xcode"
+path = "src/main.rs"
+
+[dependencies]
+# TontooOS SDK: frameworks via features (on-device: /Library/System/sdk).
+sdk = { path = "/Library/System/sdk", features = ["TontooUI", "CoreIcon", "Foundation", "Accessibility", "ArchiveKit"] }
+vello = "0.10"
