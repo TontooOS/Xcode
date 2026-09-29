@@ -24,6 +24,7 @@
     "ed.device": "My Mac",
     "ed.no_selection": "Keine Auswahl",
     "ed.filter": "Filter",
-    "ed.status": "Zeile: 1  Spalte: 1"
+    "ed.status": "Zeile: 1  Spalte: 1",
+    "ed.search": "Suchen"
   }
 }

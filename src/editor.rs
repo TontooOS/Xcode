@@ -1,13 +1,14 @@
 //! Example project editor window for Xcode (separate big window).
 //!
 //! A static Xcode-like IDE card built on the `Sidebar` element: working
-//! traffic lights (owned by the sidebar), dead `left_button` pills
-//! (sidebar toggle plus Run, no callbacks), a file navigator with one
-//! preselected file, dead example Swift code plus a dimmed minimap,
-//! breadcrumb and status bar. The element feels alive (hover, press
-//! states, selection, collapse, resize) but clicks trigger no actions:
-//! there are no callbacks, all pages are identical and nothing is ever
-//! saved, built or run.
+//! traffic lights (owned by the sidebar), one dead Run pill (no
+//! callback), a non-collapsible file navigator with one preselected
+//! file, a functionless search field stretched across the sidebar
+//! bottom, dead example Swift code plus a dimmed minimap, breadcrumb
+//! and status bar. The element feels alive (hover, press states,
+//! selection, resize) but clicks trigger no actions: there are no
+//! callbacks, all pages are identical and nothing is ever saved, built
+//! or run.
 //!
 //! Handoff without CLI: the starter sets `XCODE_PROJECT_NAME` on a
 //! spawned copy of this binary and closes its own window at once;
@@ -15,10 +16,10 @@
 //! closes, short gap), then opens the 1100x700 editor fresh.
 
 use crate::TontooUI::elements::{
-  Align, BasicText, HStack, Sidebar, SidebarItem, Spacer, TextForeground,
-  TextStyle, TrafficAction, View, VStack,
+  Align, BasicText, HStack, SearchField, Sidebar, SidebarItem, Spacer,
+  TextForeground, TextStyle, TrafficAction, View, VStack,
 };
-use crate::TontooUI::renderer::window::{App, CursorKind, Viewport, WindowCommand, run};
+use crate::TontooUI::renderer::window::{App, CursorKind, Key, Viewport, WindowCommand, run};
 use crate::TontooUI::renderer::{FontSystem, ImageLoader};
 use crate::TontooUI::theme::{ThemeMode, ThemeWatcher};
 use crate::lang;
@@ -33,8 +34,12 @@ const OPEN_DELAY_MS: u64 = 600;
 /// Editor window size: much bigger than the 420x585 start page.
 const EDITOR_W: u32 = 1100;
 const EDITOR_H: u32 = 700;
-/// Navigator file row index (forced selected every frame).
+/// Navigator file row index (preselected once).
 const FILE_INDEX: usize = 4;
+/// Bottom search height: deliberately small; the width always spans
+/// the full sidebar column.
+const SEARCH_H: f32 = 28.0;
+const SEARCH_PAD: f32 = 8.0;
 
 /// File stem rule mirroring the reference: alphanumeric name plus an
 /// `App` suffix unless it already ends in `app` (`test` -> `testApp`,
@@ -102,6 +107,7 @@ fn editor_page(breadcrumb: String, code: String, filter: String, status: String)
 
 pub struct EditorUi {
   sidebar: Sidebar,
+  search: SearchField,
   code_width: f32,
   watcher: ThemeWatcher,
   focused: bool,
@@ -127,12 +133,13 @@ impl EditorUi {
       .page(editor_page(breadcrumb, code, filter, status))
       .search_field(false)
       .toggle_button(false)
-      .left_button(0, "sidebar.left", || {})
-      .left_button(1, "play.fill", || {});
+      .collapsible(false)
+      .left_button(0, "play.fill", || {});
     sidebar.set_title(format!("{project} › {}", lang::t("ed.device")));
     sidebar.select(FILE_INDEX);
     Self {
       sidebar,
+      search: SearchField::new(lang::t("ed.search")),
       code_width: 600.0,
       watcher: ThemeWatcher::new(),
       focused: true,
@@ -193,6 +200,8 @@ impl EditorUi {
     self.sidebar.set_theme(palette.accent, dark);
     self.sidebar.set_glass(theme.mode, theme.glass);
     self.sidebar.set_focused(focused);
+    self.search.set_theme(theme.mode, palette.accent, theme.glass);
+    self.search.set_focused(focused);
     // Code width follows the content size (window is fixed, maximize
     // still changes the viewport).
     self.code_width = (viewport.width - 48.0 - self.sidebar.width_value() - 136.0).max(40.0);
@@ -207,6 +216,17 @@ impl EditorUi {
     // live in it) and fills the whole viewport.
     self.sidebar.place(fonts, viewport.x, viewport.y, viewport.width, viewport.height);
     self.sidebar.draw(scene, fonts, images);
+    // Functionless search capsule pinned to the sidebar bottom:
+    // small height, full column width even while resizing.
+    let col_w = self.sidebar.width_value();
+    self.search.place(
+      fonts,
+      viewport.x + SEARCH_PAD,
+      viewport.y + viewport.height - SEARCH_PAD - SEARCH_H,
+      (col_w - SEARCH_PAD * 2.0).max(0.0),
+      SEARCH_H,
+    );
+    self.search.draw(scene, fonts, images);
   }
 
   pub fn background(&self) -> Color {
@@ -241,9 +261,11 @@ impl EditorUi {
   }
 
   pub fn mouse_down(&mut self, x: f64, y: f64) {
-    // Native element feel (press states, selection, collapse): clicks
-    // trigger no actions, there are no callbacks anywhere.
+    // Native element feel (press states, selection, resize): clicks
+    // trigger no actions, there are no callbacks anywhere. The search
+    // only takes focus and typing, it never searches.
     self.sidebar.mouse_down(x, y);
+    self.search.mouse_down(x, y);
   }
 
   pub fn mouse_up(&mut self, x: f64, y: f64) {
@@ -254,6 +276,18 @@ impl EditorUi {
     self.sidebar.mouse_wheel(dx, dy);
   }
 
+  pub fn type_text(&mut self, content: &str) {
+    self.search.type_text(content);
+  }
+
+  pub fn key(&mut self, key: Key) -> bool {
+    self.search.key(key)
+  }
+
+  pub fn wants_text_cursor(&self) -> bool {
+    self.search.wants_text_cursor()
+  }
+
   pub fn wants_resize(&self, x: f64, y: f64) -> bool {
     self.sidebar.wants_resize_cursor(x, y)
   }
@@ -261,6 +295,7 @@ impl EditorUi {
   pub fn set_focused(&mut self, focused: bool) {
     self.focused = focused;
     self.sidebar.set_focused(focused);
+    self.search.set_focused(focused);
   }
 }
 
@@ -339,11 +374,21 @@ impl App for EditorApp {
   }
 
   fn cursor(&self, x: f64, y: f64) -> CursorKind {
-    if self.ui.wants_resize(x, y) {
+    if self.ui.wants_text_cursor() {
+      CursorKind::Text
+    } else if self.ui.wants_resize(x, y) {
       CursorKind::ResizeColumn
     } else {
       CursorKind::Default
     }
+  }
+
+  fn text(&mut self, content: &str) {
+    self.ui.type_text(content);
+  }
+
+  fn key(&mut self, key: Key) {
+    let _ = self.ui.key(key);
   }
 
   fn set_focused(&mut self, focused: bool) {
