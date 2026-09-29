@@ -57,6 +57,14 @@ const ROW_PAD_X: f32 = 9.0;
 const BOX_PAD: f32 = 6.0;
 /// Visible project rows without scrolling (display only for now).
 const MAX_ROWS: usize = 4;
+/// Close pill geometry: matches its placement in `draw`.
+const CLOSE_X: f32 = 12.0;
+const CLOSE_Y: f32 = 12.0;
+const CLOSE_S: f32 = 36.0;
+
+fn hit_rect(rect: (f32, f32, f32, f32), x: f32, y: f32) -> bool {
+  x >= rect.0 && x <= rect.0 + rect.2 && y >= rect.1 && y <= rect.1 + rect.3
+}
 
 /// One project row: folder icon plus display name/path text column.
 fn project_row(name: &str, path: &str) -> HStack {
@@ -94,6 +102,11 @@ struct StartPage {
   show_sheet: Rc<Cell<bool>>,
   cancel_sheet: Rc<Cell<bool>>,
   sheet_ibeam: Cell<bool>,
+  /// Last cursor position (tracks hover): the drag region is only the
+  /// background, so presses over controls reach the app as clicks.
+  cursor: Cell<(f32, f32)>,
+  /// Placed button rects from the last frame for the hit test above.
+  action_rects: Vec<(f32, f32, f32, f32)>,
   watcher: ThemeWatcher,
   focused: bool,
   bg: Color,
@@ -195,6 +208,8 @@ impl StartPage {
       show_sheet,
       cancel_sheet,
       sheet_ibeam: Cell::new(false),
+      cursor: Cell::new((-1.0, -1.0)),
+      action_rects: Vec::new(),
       watcher: ThemeWatcher::new(),
       focused: true,
       bg: TontooUI::renderer::window::BACKGROUND,
