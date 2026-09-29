@@ -69,4 +69,5 @@ See [StartPage.md](StartPage.md) for details.
 - 2026-09-29: Collapse button removed; device group centered on the window; picked menu row reflects on top (label plus icon, display only).
 - 2026-09-29: Sheet `Cancel`/`Create` buttons use `SHEET_BUTTON_BG_DARK` in dark mode (`BUTTON_BG_DARK` melts into the sheet card, only the label showed).
 - 2026-09-29: Minimap removed, code uses the full content width.
+- 2026-09-29: Device text centered on the window middle (glass symmetric around it, glyph hanging left).
 - 2026-09-29: Editor code via DocumentKit Rust highlighting with gray line gutters (SDK gains the missing `DocumentKit` module).

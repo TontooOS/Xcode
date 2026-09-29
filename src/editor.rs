@@ -22,7 +22,7 @@ use crate::TontooUI::elements::{
   Align, BasicText, BasicToolbar, FileImage, FormattedText, HStack,
   HorizontalDivider, MenuItem, NestedMenu, SearchField, Sidebar, SidebarItem,
   Span, Spacer, TextAlignment, TextForeground, TextStyle, ToolbarItem,
-  TrafficAction, View, VStack,
+  TrafficAction, View, VStack, MENU_BTN_PAD_X,
 };
 use crate::TontooUI::renderer::window::{App, CursorKind, Key, Viewport, WindowCommand, run};
 use crate::TontooUI::renderer::{FontSystem, ImageLoader};
@@ -44,6 +44,10 @@ const FILE_INDEX: usize = 4;
 /// Device glyph size next to the menu and its gap.
 const DEVICE_ICON: f32 = 22.0;
 const DEVICE_GAP: f32 = 8.0;
+/// Device menu text size (matches `button_font` below).
+const DEVICE_FONT: f32 = 15.0;
+/// Glass padding beyond the widest side.
+const GLASS_PAD: f32 = 16.0;
 /// Bottom search height: deliberately small; the width always spans
 /// the full sidebar column.
 const SEARCH_H: f32 = 28.0;
@@ -337,7 +341,7 @@ impl EditorUi {
         }
       })
       .transparent_button(true)
-      .button_font(15.0),
+      .button_font(DEVICE_FONT),
       device_icons,
       device_labels,
       device_sel,
@@ -468,28 +472,35 @@ impl EditorUi {
     let col_w = self.sidebar.width_value();
     let content_x = viewport.x + col_w;
     let content_w = (viewport.width - col_w).max(0.0);
-    // Topbar row in the content toolbar zone: device glyph plus
-    // text-menu centered on the window, dead chevron pair at the
+    // Topbar row in the content toolbar zone: the TEXT centers on
+    // the window middle, the glyph hangs left of it, the glass pill
+    // spans symmetric around the text. Dead chevron pair at the
     // content left.
     self.device.set_viewport(viewport.x, viewport.y, viewport.width, viewport.height);
     let (menu_w, menu_h) = self.device.measure(fonts);
-    let group_w = DEVICE_ICON + DEVICE_GAP + menu_w;
-    let group_x = viewport.x + ((viewport.width - group_w) / 2.0).max(0.0);
+    let label = self.device.button_text().to_string();
+    let (tw, _) = FontSystem::layout_size(&fonts.layout_text(&label, DEVICE_FONT, Color::WHITE, None));
+    let text_w = tw / fonts.scale;
+    let middle = viewport.x + viewport.width / 2.0;
+    // NestedMenu draws button text at `menu_x + MENU_BTN_PAD_X`.
+    let menu_x = middle - MENU_BTN_PAD_X - text_w / 2.0;
+    let icon_x = menu_x - DEVICE_GAP - DEVICE_ICON;
+    let half = ((middle - icon_x + GLASS_PAD).max(menu_x + menu_w - middle + GLASS_PAD)).max(0.0);
     self.computer.place(
       fonts,
-      group_x,
+      icon_x,
       viewport.y + 14.0 + ((menu_h - DEVICE_ICON) / 2.0).max(0.0),
       DEVICE_ICON,
       DEVICE_ICON,
     );
     self.computer.draw(scene, fonts, images);
-    // Glass body behind the transparent menu button (16px longer on
-    // each side, 36px tall like the other pills).
+    // Glass body symmetric around the text, 36px tall like the other
+    // pills.
     let glass_h = 36.0;
     let glass_y = viewport.y + 14.0 + ((menu_h - glass_h) / 2.0).max(0.0);
-    self.menu_glass.place(fonts, group_x - 16.0, glass_y, group_w + 32.0, glass_h);
+    self.menu_glass.place(fonts, middle - half, glass_y, half * 2.0, glass_h);
     self.menu_glass.draw(scene, fonts, images);
-    self.device.place(fonts, group_x + DEVICE_ICON + DEVICE_GAP, viewport.y + 14.0, menu_w, menu_h);
+    self.device.place(fonts, menu_x, viewport.y + 14.0, menu_w, menu_h);
     self.device.draw(scene, fonts, images);
     let (chev_w, _) = self.chev.measure(fonts);
     self.chev.place(fonts, content_x + SEARCH_PAD, viewport.y + 14.0, chev_w, 36.0);
