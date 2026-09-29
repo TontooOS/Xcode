@@ -19,7 +19,7 @@ use std::rc::Rc;
 
 use crate::TontooUI::elements::{
   BasicText, BasicTextField, Button, ButtonShape, ButtonStyle, SegmentedPicker,
-  TextForeground, TextStyle, View, BUTTON_BG_DARK, BUTTON_BG_LIGHT,
+  TextForeground, TextStyle, View, BUTTON_BG_LIGHT, SHEET_BUTTON_BG_DARK,
 };
 use crate::TontooUI::renderer::window::Key;
 use crate::TontooUI::renderer::{FontSystem, ImageLoader};
@@ -238,8 +238,11 @@ impl NewProjectForm {
     self.loc_target.set_focused(focused);
     // The error line keeps its hand-set red color (no `set_theme`).
     self.error.set_focused(focused);
+    // Buttons sit on the sheet card: in dark mode they need
+    // SHEET_BUTTON_BG_DARK (darker than the card), plain
+    // BUTTON_BG_DARK melts into the card and only the label shows.
     let (button_bg, button_text) = if dark {
-      (BUTTON_BG_DARK, Color::WHITE)
+      (SHEET_BUTTON_BG_DARK, Color::WHITE)
     } else {
       (BUTTON_BG_LIGHT, Color::BLACK)
     };

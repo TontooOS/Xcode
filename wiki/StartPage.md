@@ -82,7 +82,7 @@ pub fn update(&mut self, accent: Color, dark: bool, mode: ThemeMode, focused: bo
 | `org` | `BasicTextField` | `sheet.bundle_id` label plus organization field, prefilled with `dev.<username>` (`scaffold::default_bundle_id`) |
 | `preview` | `BasicText` | Live `{org}.{english_name}` line (`Caption`, `Secondary`); shows `AppName` while the English name is empty and the `dev.<username>` default while the org is empty; English only |
 | `error` | `BasicText` | Red `Caption` hint (`sheet.err_*`) after failed validation; empty otherwise |
-| `buttons` | `HStack` | `Cancel` left, `Create` right (capsule `Button` elements) |
+| `buttons` | `HStack` | `Cancel` left, `Create` right (capsule `Button` elements, `SHEET_BUTTON_BG_DARK`/`WHITE` in dark mode so they contrast the sheet card, `BUTTON_BG_LIGHT`/`BLACK` in light mode) |
 | `chooser` | step 2 | `location.title`, current path line, `..` plus up to 8 subdirectory buttons (`Plain` + `folder.fill`), `location.new_folder` target preview, `Cancel` / `Create` row |
 
 ### Rules
