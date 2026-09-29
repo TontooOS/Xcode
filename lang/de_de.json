@@ -5,7 +5,6 @@
     "app.title": "Xcode",
     "app.version": "Version {version}",
     "action.open": "Open...",
-    "action.clone": "Clone...",
     "action.new_project": "New Project",
     "recent.swiftiu": "SwiftIU",
     "recent.swiftiu_path": "~/Desktop",

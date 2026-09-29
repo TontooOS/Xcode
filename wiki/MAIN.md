@@ -5,7 +5,7 @@ card on Vello/WGPU (~25% smaller than the Apple reference) with no
 traffic lights (one round toolbar button with an `xmark` glyph closes
 the window), the centered 90px app icon from `Resources/icon.tico`
 rendered through CoreIcon in its normal (light) variant, the `Xcode`
-title with a `Version 27.0` line, three example capsule buttons and a
+title with a `Version 27.0` line, two example capsule buttons and a
 static scaled-down recents box. It follows the live system color scheme
 through `ThemeWatcher` and loads `en_us`/`de_de` strings from `lang/`
 via Accessibility.
@@ -40,3 +40,4 @@ See [StartPage.md](StartPage.md) for details.
 - 2026-09-29: Initial Xcode start page (X close toolbar button, centered `icon.tico` in normal variant, `Open...` / `Clone...` / `New Project` example buttons, static recents box, `lang/en_us.json` and `lang/de_de.json`).
 - 2026-09-29: Scaled the whole window ~25% down to 420x585 (90px icon, 330x255 recents box, smaller row text).
 - 2026-09-29: Full-window background drag (press anywhere drags the app, releases over controls still click).
+- 2026-09-29: Removed the `Clone...` button; `New Project` is a plain label without chevron icon.

@@ -5,7 +5,7 @@ The start page renders the Xcode welcome window: a fixed 420x585 card
 traffic lights. The only chrome at the top is a single round
 `BasicToolbar` pill with one `xmark` icon that closes the window. Below
 it, the app icon from `Resources/icon.tico` shows centered at 90px,
-followed by the bold `Xcode` title, a `Version 27.0` line, three example
+followed by the bold `Xcode` title, a `Version 27.0` line, two example
 capsule buttons and a static scaled-down recents box mirroring the
 reference screenshot.
 
@@ -24,7 +24,7 @@ const WINDOW_HEIGHT: u32 = 585;
 | `icon` | `FileImage` | 90x90, 21px radius, centered; shows the CoreIcon PNG (see `## Icon Pipeline`) |
 | `title` | `BasicText` | `app.title` in `TextStyle::Headline` (17 semibold), centered |
 | `version` | `BasicText` | `app.version` in `TextStyle::Caption` with `TextForeground::Secondary`, centered |
-| `actions` | `HStack` | Three capsule `Button` elements: `action.open`, `action.clone`, `action.new_project` (with `chevron.down` icon); example `on_press` handlers only print |
+| `actions` | `HStack` | Two capsule `Button` elements: `action.open`, `action.new_project` (plain label, no icon); example `on_press` handlers only print |
 | `recents` | `RoundedRectangle` + rows | 330x255 container (`BUTTON_BG_DARK` / `BUTTON_BG_LIGHT`) with four static 48px rows (30px symbols, `Caption` name + `Caption2` path) and three `HorizontalDivider` elements; the first row sits on an accent `RoundedRectangle` selection fill |
 
 ### Rules
@@ -115,9 +115,9 @@ pub fn t(key: &str) -> String
 cargo run
 ```
 
-Prints `open pressed (example)`, `clone pressed (example)` or
-`new project pressed (example)` to stdout when an example button is
-pressed. Closing works through the `xmark` pill only.
+Prints `open pressed (example)` or `new project pressed (example)` to
+stdout when an example button is pressed. Closing works through the
+`xmark` pill only.
 
 ## Cross References
 

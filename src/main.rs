@@ -6,7 +6,7 @@
 //! glyph at the top left (closes the window), the centered app icon
 //! from `Resources/icon.tico` rendered through CoreIcon in its normal
 //! (light) variant, the `Xcode` title with a `Version 27.0` line,
-//! three example capsule buttons (`Open...`, `Clone...`, `New Project`)
+//! three example capsule buttons (`Open...`, `New Project`)
 //! and a static scaled-down recents box mirroring the reference
 //! screenshot (SwiftIU, Tux, Tux.zip, C Maps with the first row
 //! selected).
@@ -115,14 +115,8 @@ impl StartPage {
           .on_press(|| println!("open pressed (example)")),
       )
       .child(
-        Button::new(lang::t("action.clone"))
-          .shape(ButtonShape::Capsule)
-          .on_press(|| println!("clone pressed (example)")),
-      )
-      .child(
         Button::new(lang::t("action.new_project"))
           .shape(ButtonShape::Capsule)
-          .icon("chevron.down")
           .on_press(|| println!("new project pressed (example)")),
       );
 
