@@ -2,11 +2,13 @@
 
 The example project editor is a big 1100x700 window in its own
 process, built on the `Sidebar` element: working traffic lights
-(owned by the sidebar), dead `left_button` pills (sidebar toggle plus
-Run, no callbacks), a dead file navigator with one forced-selected
-file, dead example Swift code plus a dimmed minimap, breadcrumb and
-status bar. Everything is display-only except the traffic lights
-(close, minimize, maximize). No CLI anywhere, no TBuild calls.
+(owned by the sidebar), `left_button` pills without callbacks
+(sidebar toggle plus Run), a file navigator preselected on the file
+row, dead example Swift code plus a dimmed minimap, breadcrumb and
+status bar. The element feels alive (hover, press states, selection,
+collapse, resize, wheel) but clicks trigger no actions: no callbacks
+are registered, all pages are identical and nothing is ever saved,
+built or run. No CLI anywhere, no TBuild calls.
 
 ## Processes
 
@@ -44,8 +46,8 @@ pages: narrow windows squeeze the code, wide windows use everything.
 | Area | Element | Description |
 |---|---|---|
 | `bar` | `Sidebar` traffic | All three traffic lights working via `press()`; drags via `drag_rect()` |
-| `pills` | `left_button` | Dead `sidebar.left` (collapse) and `play.fill` (Run) pills, no callbacks; content title via `set_title` (`{project} › My Mac`, `ed.device`) |
-| `navigator` | `SidebarItem` | Project root plus `Assets`, `ContentView`, `Info` and file rows; search hidden (`search_field(false)`), toggle pill hidden, file row forced selected every frame (no `on_select` at all) |
+| `pills` | `left_button` | `sidebar.left` (collapse) and `play.fill` (Run) pills with no-op callbacks: press animation plays, nothing happens; content title via `set_title` (`{project} › My Mac`, `ed.device`) |
+| `navigator` | `SidebarItem` | Project root plus `Assets`, `ContentView`, `Info` and file rows, preselected on the file row; search hidden (`search_field(false)`), toggle pill hidden; mouse reaches the element natively (hover, selection, collapse, wheel, resize cursor) |
 | `editor` | page `BasicText` | Static example Swift code (`Footnote`), file stem via `file_stem`, width follows the content size |
 | `inspector` | page `BasicText` | Same code dimmed at `Caption2` as a faux minimap (112px) |
 | `status` | page `HStack` | `Filter` (`ed.filter`), `Spacer`, `Line: 1  Col: 1` (`ed.status`) |

@@ -2,10 +2,12 @@
 //!
 //! A static Xcode-like IDE card built on the `Sidebar` element: working
 //! traffic lights (owned by the sidebar), dead `left_button` pills
-//! (sidebar toggle plus Run, no callbacks), a dead file navigator with
-//! one forced-selected file, dead example Swift code plus a dimmed
-//! minimap, breadcrumb and status bar. Everything is display-only
-//! except the traffic lights (close, minimize, maximize).
+//! (sidebar toggle plus Run, no callbacks), a file navigator with one
+//! preselected file, dead example Swift code plus a dimmed minimap,
+//! breadcrumb and status bar. The element feels alive (hover, press
+//! states, selection, collapse, resize) but clicks trigger no actions:
+//! there are no callbacks, all pages are identical and nothing is ever
+//! saved, built or run.
 //!
 //! Handoff without CLI: the starter sets `XCODE_PROJECT_NAME` on a
 //! spawned copy of this binary and closes its own window at once;
@@ -16,7 +18,7 @@ use crate::TontooUI::elements::{
   Align, BasicText, HStack, Sidebar, SidebarItem, Spacer, TextForeground,
   TextStyle, TrafficAction, View, VStack,
 };
-use crate::TontooUI::renderer::window::{App, Viewport, WindowCommand, run};
+use crate::TontooUI::renderer::window::{App, CursorKind, Viewport, WindowCommand, run};
 use crate::TontooUI::renderer::{FontSystem, ImageLoader};
 use crate::TontooUI::theme::{ThemeMode, ThemeWatcher};
 use crate::lang;
@@ -191,9 +193,6 @@ impl EditorUi {
     self.sidebar.set_theme(palette.accent, dark);
     self.sidebar.set_glass(theme.mode, theme.glass);
     self.sidebar.set_focused(focused);
-    // Dead navigator: the file row stays selected no matter what was
-    // clicked (no `on_select` handler at all).
-    self.sidebar.select(FILE_INDEX);
     // Code width follows the content size (window is fixed, maximize
     // still changes the viewport).
     self.code_width = (viewport.width - 48.0 - self.sidebar.width_value() - 136.0).max(40.0);
@@ -236,9 +235,27 @@ impl EditorUi {
     self.command.take()
   }
 
-  /// Hover only: traffic light glyphs react, nothing else does.
+  /// Hover only: traffic light glyphs and row highlights react.
   pub fn hover(&mut self, x: f32, y: f32) {
     self.sidebar.set_hover(x, y);
+  }
+
+  pub fn mouse_down(&mut self, x: f64, y: f64) {
+    // Native element feel (press states, selection, collapse): clicks
+    // trigger no actions, there are no callbacks anywhere.
+    self.sidebar.mouse_down(x, y);
+  }
+
+  pub fn mouse_up(&mut self, x: f64, y: f64) {
+    self.sidebar.mouse_up(x, y);
+  }
+
+  pub fn mouse_wheel(&mut self, dx: f64, dy: f64) {
+    self.sidebar.mouse_wheel(dx, dy);
+  }
+
+  pub fn wants_resize(&self, x: f64, y: f64) -> bool {
+    self.sidebar.wants_resize_cursor(x, y)
   }
 
   pub fn set_focused(&mut self, focused: bool) {
@@ -302,15 +319,31 @@ impl App for EditorApp {
   }
 
   fn mouse_down(&mut self, x: f64, y: f64) {
-    // Only the traffic lights act; the sidebar pages are dead example
-    // chrome and receive no mouse routing at all.
-    let _ = self.ui.press_traffic(x, y);
+    // Only the traffic lights act; anything else is element feel
+    // without actions (no callbacks registered anywhere).
+    if !self.ui.press_traffic(x, y) {
+      self.ui.mouse_down(x, y);
+    }
   }
 
-  fn mouse_up(&mut self, _x: f64, _y: f64) {}
+  fn mouse_up(&mut self, x: f64, y: f64) {
+    self.ui.mouse_up(x, y);
+  }
 
   fn mouse_move(&mut self, x: f64, y: f64) {
     self.ui.hover(x as f32, y as f32);
+  }
+
+  fn mouse_wheel(&mut self, dx: f64, dy: f64) {
+    self.ui.mouse_wheel(dx, dy);
+  }
+
+  fn cursor(&self, x: f64, y: f64) -> CursorKind {
+    if self.ui.wants_resize(x, y) {
+      CursorKind::ResizeColumn
+    } else {
+      CursorKind::Default
+    }
   }
 
   fn set_focused(&mut self, focused: bool) {
