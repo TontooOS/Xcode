@@ -5,7 +5,7 @@ card on Vello/WGPU (~25% smaller than the Apple reference) with no
 traffic lights (one round toolbar button with an `xmark` glyph closes
 the window), the centered 90px app icon from `Resources/icon.tico`
 rendered through CoreIcon in its normal (light) variant, the `Xcode`
-title with a `Version 27.0` line, two example capsule buttons and a
+title with a `Version 27.0.0` line, two example capsule buttons and a
 project list. `New Project` opens a modal options sheet on top
 (EN/DE app name, version, bundle ID, live bundle identifier preview,
 folder chooser, `Cancel` / `Create`): `Create` scaffolds a real app
@@ -48,3 +48,4 @@ See [StartPage.md](StartPage.md) for details.
 - 2026-09-29: Removed the `Clone...` button; `New Project` is a plain label without chevron icon.
 - 2026-09-29: Empty recents box by default plus modal new-project sheet (EN/DE name switch, version, bundle ID, live `{org}.{english_name}` preview, `Cancel` closes, `Create` is an example).
 - 2026-09-29: Real project creation (folder chooser from `~/Documents`, scaffold with `Cargo.toml`/`tontoo.proj`/`.gitignore`/`src`/`Resources`/`lang`, CoreData `Project` records, `No Projects` placeholder, first row selected).
+- 2026-09-29: Scaffold generates lowercase `src/content_view.rs` (Linux module resolution) with trimmed template imports, `Resources/lang/` runtime mirror next to build-input `lang/`, Xcode version line shows `27.0.0`.

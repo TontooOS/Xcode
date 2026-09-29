@@ -17,6 +17,7 @@
     "sheet.ph_version": "1.0",
     "sheet.err_required": "App-Name, Version und Bundle-ID sind erforderlich.",
     "sheet.err_name": "App-Name muss Buchstaben oder Ziffern enthalten.",
+    "sheet.err_version": "Version muss wie 1.0.0 aussehen.",
     "sheet.err_exists": "Ein Ordner mit diesem Namen existiert bereits.",
     "location.title": "Ort wählen:",
     "location.new_folder": "Neuer Ordner:"

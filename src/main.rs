@@ -5,7 +5,7 @@
 //! no traffic lights, only one round toolbar button with an `xmark`
 //! glyph at the top left (closes the window), the centered app icon
 //! from `Resources/icon.tico` rendered through CoreIcon in its normal
-//! (light) variant, the `Xcode` title with a `Version 27.0` line, two
+//! (light) variant, the `Xcode` title with a `Version 27.0.0` line, two
 //! example capsule buttons (`Open...`, `New Project`) and an empty
 //! recents box. `New Project` opens a modal sheet on top with the
 //! project options (EN/DE app name, version, bundle ID, live bundle
@@ -75,7 +75,7 @@ fn project_row(name: &str, path: &str) -> HStack {
     .child(SFSymbolImage::new("folder.fill").size(30.0))
     .child(texts)
 }
-const VERSION: &str = "27.0";
+const VERSION: &str = "27.0.0";
 
 struct StartPage {
   close_bar: BasicToolbar,

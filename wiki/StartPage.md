@@ -5,7 +5,7 @@ The start page renders the Xcode welcome window: a fixed 420x585 card
 traffic lights. The only chrome at the top is a single round
 `BasicToolbar` pill with one `xmark` icon that closes the window. Below
 it, the app icon from `Resources/icon.tico` shows centered at 90px,
-followed by the bold `Xcode` title, a `Version 27.0` line, two example
+followed by the bold `Xcode` title, a `Version 27.0.0` line, two example
 capsule buttons and a project list (`No Projects` while empty).
 `New Project` opens a modal options sheet on top (see
 `## NewProject Sheet`); the start page stays visible behind the dimmed
