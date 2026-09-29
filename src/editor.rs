@@ -21,7 +21,7 @@ use crate::DocumentKit::{SyntaxLang, highlight_syntax as highlight};
 use crate::TontooUI::elements::{
   Align, BasicText, BasicToolbar, FileImage, FormattedText, HStack,
   HorizontalDivider, MenuItem, NestedMenu, SearchField, Sidebar, SidebarItem,
-  Span, Spacer, TextAlignment, TextForeground, TextStyle, ToolbarItem,
+  Span, TextAlignment, TextForeground, TextStyle, ToolbarItem,
   TrafficAction, View, VStack, MENU_BTN_PAD_X,
 };
 use crate::TontooUI::renderer::window::{App, CursorKind, Key, Viewport, WindowCommand, run};
@@ -184,38 +184,13 @@ fn dim_text(text: Color) -> Color {
   Color::from_rgba8(c.r, c.g, c.b, (c.a as f32 * 0.6).round() as u8)
 }
 
-/// Static editor page: breadcrumb, highlighted code with gray line
-/// numbers, status bar.
-fn editor_page(breadcrumb: String, lines: &[String], dim: Color, filter: String, status: String) -> VStack {
+/// Static editor page: highlighted code with gray line numbers.
+fn editor_page(lines: &[String], dim: Color) -> VStack {
   let mut rows = VStack::new().spacing(2.0).align(Align::Leading);
   for (no, line) in lines.iter().enumerate() {
     rows = rows.child(code_row(no, highlight_spans(line, dim)));
   }
-  VStack::new()
-    .spacing(8.0)
-    .align(Align::Leading)
-    .child(
-      BasicText::new(breadcrumb)
-        .style(TextStyle::Caption)
-        .foreground(TextForeground::Secondary),
-    )
-    .child(rows)
-    .child(
-      HStack::new()
-        .spacing(8.0)
-        .align(Align::Center)
-        .child(
-          BasicText::new(filter)
-            .style(TextStyle::Caption)
-            .foreground(TextForeground::Secondary),
-        )
-        .child(Spacer::new())
-        .child(
-          BasicText::new(status)
-            .style(TextStyle::Caption)
-            .foreground(TextForeground::Secondary),
-        ),
-    )
+  rows
 }
 
 pub struct EditorUi {
@@ -253,7 +228,7 @@ pub struct EditorUi {
 }
 
 impl EditorUi {
-  pub fn new(project: &str, breadcrumb: String, code: String, filter: String, status: String) -> Self {
+  pub fn new(project: &str, code: String) -> Self {
     let file = file_stem(project);
     let items = vec![
       SidebarItem::new(project, "folder.fill"),
@@ -293,11 +268,11 @@ impl EditorUi {
     // in the live theme text color (see `wire_page`).
     let dim = dim_text(Color::from_rgb8(0xd8, 0xd9, 0xd9));
     let mut sidebar = Sidebar::new(items)
-      .page(editor_page(breadcrumb.clone(), &code_lines, dim, filter.clone(), status.clone()))
-      .page(editor_page(breadcrumb.clone(), &code_lines, dim, filter.clone(), status.clone()))
-      .page(editor_page(breadcrumb.clone(), &code_lines, dim, filter.clone(), status.clone()))
-      .page(editor_page(breadcrumb.clone(), &code_lines, dim, filter.clone(), status.clone()))
-      .page(editor_page(breadcrumb, &code_lines, dim, filter, status))
+      .page(editor_page(&code_lines, dim))
+      .page(editor_page(&code_lines, dim))
+      .page(editor_page(&code_lines, dim))
+      .page(editor_page(&code_lines, dim))
+      .page(editor_page(&code_lines, dim))
       .search_field(false)
       .toggle_button(false)
       .collapsible(false);
@@ -370,38 +345,22 @@ impl EditorUi {
     dim: Color,
     recolor: bool,
   ) {
-    let Some(stack) = page.as_any_mut().downcast_mut::<VStack>() else {
+    let Some(rows) = page.as_any_mut().downcast_mut::<VStack>() else {
       return;
     };
-    if let Some(line) = stack.child_mut::<BasicText>(0) {
-      line.set_theme(mode);
-      line.set_focused(focused);
-    }
-    if let Some(rows) = stack.child_mut::<VStack>(1) {
-      for (no, source) in lines.iter().enumerate() {
-        if let Some(row) = rows.child_mut::<HStack>(no) {
-          if let Some(gutter) = row.child_mut::<BasicText>(0) {
-            gutter.set_theme(mode);
-            gutter.set_focused(focused);
-          }
-          if let Some(code) = row.child_mut::<FormattedText>(1) {
-            if recolor {
-              code.set_source(highlight_spans(source, dim));
-            }
-            code.set_theme(mode);
-            code.set_focused(focused);
-          }
+    for (no, source) in lines.iter().enumerate() {
+      if let Some(row) = rows.child_mut::<HStack>(no) {
+        if let Some(gutter) = row.child_mut::<BasicText>(0) {
+          gutter.set_theme(mode);
+          gutter.set_focused(focused);
         }
-      }
-    }
-    if let Some(bar) = stack.child_mut::<HStack>(2) {
-      if let Some(left) = bar.child_mut::<BasicText>(0) {
-        left.set_theme(mode);
-        left.set_focused(focused);
-      }
-      if let Some(right) = bar.child_mut::<BasicText>(2) {
-        right.set_theme(mode);
-        right.set_focused(focused);
+        if let Some(code) = row.child_mut::<FormattedText>(1) {
+          if recolor {
+            code.set_source(highlight_spans(source, dim));
+          }
+          code.set_theme(mode);
+          code.set_focused(focused);
+        }
       }
     }
   }
@@ -628,18 +587,8 @@ impl EditorApp {
   fn new(project: String) -> Self {
     let user = system_username();
     let file = file_stem(&project);
-    let breadcrumb = format!(
-      "{project} › {project} › {file} | {}",
-      lang::t("ed.no_selection")
-    );
     let code = example_code(&file, &project, &user);
-    let ui = EditorUi::new(
-      &project,
-      breadcrumb,
-      code,
-      lang::t("ed.filter"),
-      lang::t("ed.status"),
-    );
+    let ui = EditorUi::new(&project, code);
     Self { ui }
   }
 }
