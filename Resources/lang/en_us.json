@@ -25,6 +25,13 @@
     "ed.no_selection": "No Selection",
     "ed.filter": "Filter",
     "ed.status": "Line: 1  Col: 1",
-    "ed.search": "Search"
+    "ed.search": "Search",
+    "menu.device": "My Computer",
+    "menu.devices": "Devices",
+    "menu.build": "Build",
+    "menu.prod": "Build for Production",
+    "menu.dev": "Build for Development",
+    "menu.utils": "Utilities",
+    "menu.export": "Build & Export"
   }
 }

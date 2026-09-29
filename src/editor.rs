@@ -15,8 +15,9 @@
 //! `open_project_window` waits ~600ms first (old window visibly
 //! closes, short gap), then opens the 1100x700 editor fresh.
 use crate::TontooUI::elements::{
-  Align, BasicText, BasicToolbar, HStack, SearchField, Sidebar, SidebarItem,
-  Spacer, TextForeground, TextStyle, ToolbarItem, TrafficAction, View, VStack,
+  Align, BasicText, BasicToolbar, HStack, MenuItem, NestedMenu, SearchField,
+  Sidebar, SidebarItem, Spacer, TextForeground, TextStyle, ToolbarItem,
+  TrafficAction, View, VStack,
 };
 use crate::TontooUI::renderer::window::{App, CursorKind, Key, Viewport, WindowCommand, run};
 use crate::TontooUI::renderer::{FontSystem, ImageLoader};
@@ -107,9 +108,15 @@ fn editor_page(breadcrumb: String, code: String, filter: String, status: String)
 pub struct EditorUi {
   sidebar: Sidebar,
   search: SearchField,
-  /// Dead Run/Stop pair at the content top right (hover/press tint
-  /// only, no callbacks).
+  /// Dead Run/Stop pair at the sidebar top right edge (hover/press
+  /// tint only, no callbacks).
   run_stop: BasicToolbar,
+  /// Centered device text-menu with sections (example selection only).
+  device: NestedMenu,
+  /// Dead back/forward chevrons at the top right.
+  chev: BasicToolbar,
+  /// Dead collapse button at the very top right.
+  collapse_btn: BasicToolbar,
   code_width: f32,
   watcher: ThemeWatcher,
   focused: bool,
@@ -118,7 +125,7 @@ pub struct EditorUi {
 }
 
 impl EditorUi {
-  pub fn new(project: &str, user: &str, breadcrumb: String, code: String, filter: String, status: String) -> Self {
+  pub fn new(project: &str, breadcrumb: String, code: String, filter: String, status: String) -> Self {
     let file = file_stem(project);
     let items = vec![
       SidebarItem::new(project, "folder.fill"),
@@ -136,7 +143,6 @@ impl EditorUi {
       .search_field(false)
       .toggle_button(false)
       .collapsible(false);
-    sidebar.set_title(format!("{project} › {}", lang::t("ed.device")));
     sidebar.select(FILE_INDEX);
     Self {
       sidebar,
@@ -146,6 +152,27 @@ impl EditorUi {
         ToolbarItem::divider(),
         ToolbarItem::icon("stop.fill"),
       ]),
+      device: NestedMenu::new(
+        lang::t("menu.device"),
+        vec![
+          MenuItem::section(lang::t("menu.devices")),
+          MenuItem::action(lang::t("menu.device")),
+          MenuItem::divider(),
+          MenuItem::section(lang::t("menu.build")),
+          MenuItem::action(lang::t("menu.prod")),
+          MenuItem::action(lang::t("menu.dev")),
+          MenuItem::divider(),
+          MenuItem::section(lang::t("menu.utils")),
+          MenuItem::action(lang::t("menu.export")),
+        ],
+      )
+      .on_action(|path| println!("device menu {path:?} (example)")),
+      chev: BasicToolbar::from_items(vec![
+        ToolbarItem::icon("chevron.left"),
+        ToolbarItem::divider(),
+        ToolbarItem::icon("chevron.right"),
+      ]),
+      collapse_btn: BasicToolbar::from_icons(vec!["sidebar.right".to_string()]).round(true),
       code_width: 600.0,
       watcher: ThemeWatcher::new(),
       focused: true,
@@ -210,6 +237,13 @@ impl EditorUi {
     self.search.set_focused(focused);
     self.run_stop.set_theme(theme.mode, theme.glass);
     self.run_stop.set_focused(focused);
+    self.device.set_theme(palette.accent, dark);
+    self.device.set_glass(theme.mode, theme.glass);
+    self.device.set_focused(focused);
+    self.chev.set_theme(theme.mode, theme.glass);
+    self.chev.set_focused(focused);
+    self.collapse_btn.set_theme(theme.mode, theme.glass);
+    self.collapse_btn.set_focused(focused);
     // Code width follows the content size (window is fixed, maximize
     // still changes the viewport).
     self.code_width = (viewport.width - 48.0 - self.sidebar.width_value() - 136.0).max(40.0);
@@ -224,6 +258,27 @@ impl EditorUi {
     // live in it) and fills the whole viewport.
     self.sidebar.place(fonts, viewport.x, viewport.y, viewport.width, viewport.height);
     self.sidebar.draw(scene, fonts, images);
+    let col_w = self.sidebar.width_value();
+    let content_x = viewport.x + col_w;
+    let content_w = (viewport.width - col_w).max(0.0);
+    let right = viewport.x + viewport.width;
+    // Topbar row in the content toolbar zone: centered device
+    // text-menu, dead chevron pair right, dead collapse pill far right.
+    self.device.set_viewport(viewport.x, viewport.y, viewport.width, viewport.height);
+    let (menu_w, menu_h) = self.device.measure(fonts);
+    self.device.place(
+      fonts,
+      content_x + ((content_w - menu_w) / 2.0).max(0.0),
+      viewport.y + 14.0,
+      menu_w,
+      menu_h,
+    );
+    self.device.draw(scene, fonts, images);
+    let (chev_w, _) = self.chev.measure(fonts);
+    self.chev.place(fonts, right - SEARCH_PAD - 36.0 - SEARCH_PAD - chev_w, viewport.y + 14.0, chev_w, 36.0);
+    self.chev.draw(scene, fonts, images);
+    self.collapse_btn.place(fonts, right - SEARCH_PAD - 36.0, viewport.y + 14.0, 36.0, 36.0);
+    self.collapse_btn.draw(scene, fonts, images);
     let col_w = self.sidebar.width_value();
     // Dead Run/Stop pair at the sidebar top right edge, vertically
     // centered on the traffic lights row like the old pills.
@@ -274,11 +329,14 @@ impl EditorUi {
     self.command.take()
   }
 
-  /// Hover only: traffic light glyphs, row highlights and the pill
-  /// tint react.
+  /// Hover only: traffic light glyphs, row highlights, pill tints
+  /// and the menu react.
   pub fn hover(&mut self, x: f32, y: f32) {
     self.sidebar.set_hover(x, y);
     self.run_stop.mouse_move(x, y);
+    self.device.mouse_move(x as f64, y as f64);
+    self.chev.mouse_move(x, y);
+    self.collapse_btn.mouse_move(x, y);
   }
 
   pub fn mouse_down(&mut self, x: f64, y: f64) {
@@ -288,13 +346,19 @@ impl EditorUi {
     self.sidebar.mouse_down(x, y);
     self.search.mouse_down(x, y);
     self.run_stop.mouse_down(x, y);
+    self.device.mouse_down(x, y);
+    self.chev.mouse_down(x, y);
+    self.collapse_btn.mouse_down(x, y);
   }
 
   pub fn mouse_up(&mut self, x: f64, y: f64) {
     self.sidebar.mouse_up(x, y);
-    // No `on_action` on the pill pair: the press tint releases into
-    // nothing, by design.
+    // No `on_action` on the pill pairs: the press tint releases into
+    // nothing, by design. The device menu keeps its example selection.
     self.run_stop.mouse_up(x, y);
+    self.device.mouse_up(x, y);
+    self.chev.mouse_up(x, y);
+    self.collapse_btn.mouse_up(x, y);
   }
 
   pub fn mouse_wheel(&mut self, dx: f64, dy: f64) {
@@ -321,12 +385,15 @@ impl EditorUi {
     self.focused = focused;
     self.sidebar.set_focused(focused);
     self.search.set_focused(focused);
+    self.run_stop.set_focused(focused);
+    self.device.set_focused(focused);
+    self.chev.set_focused(focused);
+    self.collapse_btn.set_focused(focused);
   }
 }
 
 struct EditorApp {
   ui: EditorUi,
-  title: String,
 }
 
 impl EditorApp {
@@ -340,13 +407,12 @@ impl EditorApp {
     let code = example_code(&file, &project, &user);
     let ui = EditorUi::new(
       &project,
-      &user,
       breadcrumb,
       code,
       lang::t("ed.filter"),
       lang::t("ed.status"),
     );
-    Self { ui, title: project }
+    Self { ui }
   }
 }
 

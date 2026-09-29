@@ -25,6 +25,13 @@
     "ed.no_selection": "Keine Auswahl",
     "ed.filter": "Filter",
     "ed.status": "Zeile: 1  Spalte: 1",
-    "ed.search": "Suchen"
+    "ed.search": "Suchen",
+    "menu.device": "My Computer",
+    "menu.devices": "Geräte",
+    "menu.build": "Build",
+    "menu.prod": "Build für Produktion",
+    "menu.dev": "Build für Entwicklung",
+    "menu.utils": "Dienstprogramme",
+    "menu.export": "Bauen & Exportieren"
   }
 }

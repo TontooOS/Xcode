@@ -59,4 +59,5 @@ See [StartPage.md](StartPage.md) for details.
 - 2026-09-29: Sidebar never collapses (no collapse button, Run pill only) plus a functionless 28px search capsule stretched across its bottom.
 - 2026-09-29: Dead Run/Stop pill pair at the editor content top right (hover/press tint, no callbacks).
 - 2026-09-29: Single Run/Stop pair at the sidebar top right edge (left pill removed).
+- 2026-09-29: Content topbar (centered device `NestedMenu` with Devices/Build/Utilities sections, dead chevron pair, dead far-right collapse pill; all example).
 - 2026-09-29: Sheet `Cancel`/`Create` buttons use `SHEET_BUTTON_BG_DARK` in dark mode (`BUTTON_BG_DARK` melts into the sheet card, only the label showed).
