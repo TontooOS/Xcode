@@ -19,18 +19,20 @@
 
 mod icon;
 mod lang;
+mod projects;
+mod scaffold;
 mod sheet;
 
 sdk::preinclude!();
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use TontooUI::elements::{
   Align, BasicSheet, BasicText, BasicToolbar, Button, ButtonShape, FileImage,
-  HStack, ImageFit, RoundedRectangle, ShapeFill, SheetSize, TextAlignment,
-  TextForeground, TextStyle, ToolbarPlacement, View, BUTTON_BG_DARK,
-  BUTTON_BG_LIGHT,
+  HStack, HorizontalDivider, ImageFit, RoundedRectangle, SFSymbolImage,
+  ShapeFill, SheetSize, TextAlignment, TextForeground, TextStyle,
+  ToolbarPlacement, View, VStack, BUTTON_BG_DARK, BUTTON_BG_LIGHT,
 };
 use TontooUI::renderer::window::{
   App, CursorKind, Key, Viewport, WindowCommand, run,
@@ -40,6 +42,7 @@ use TontooUI::theme::{ThemeMode, ThemeWatcher};
 use vello::Scene;
 use vello::peniko::Color;
 
+use crate::projects::{ProjectRecord, load_projects};
 use crate::sheet::NewProjectForm;
 
 const WINDOW_WIDTH: u32 = 420;
@@ -49,6 +52,29 @@ const ICON_RADIUS: f32 = 21.0;
 const CONTENT_WIDTH: f32 = 330.0;
 const TEXT_WIDTH: f32 = 330.0;
 const RECENTS_BOX_H: f32 = 255.0;
+const ROW_H: f32 = 48.0;
+const ROW_PAD_X: f32 = 9.0;
+const BOX_PAD: f32 = 6.0;
+/// Visible project rows without scrolling (display only for now).
+const MAX_ROWS: usize = 4;
+
+/// One project row: folder icon plus display name/path text column.
+fn project_row(name: &str, path: &str) -> HStack {
+  let texts = VStack::new()
+    .spacing(1.5)
+    .align(Align::Leading)
+    .child(BasicText::new(name).style(TextStyle::Caption))
+    .child(
+      BasicText::new(path)
+        .style(TextStyle::Caption2)
+        .foreground(TextForeground::Secondary),
+    );
+  HStack::new()
+    .spacing(9.0)
+    .align(Align::Center)
+    .child(SFSymbolImage::new("folder.fill").size(30.0))
+    .child(texts)
+}
 const VERSION: &str = "27.0";
 
 struct StartPage {
@@ -58,8 +84,12 @@ struct StartPage {
   title: BasicText,
   version: BasicText,
   actions: HStack,
+  records: Vec<ProjectRecord>,
+  rows: Vec<HStack>,
+  dividers: Vec<HorizontalDivider>,
   empty_label: BasicText,
   box_bg: RoundedRectangle,
+  selection_bg: RoundedRectangle,
   sheet: BasicSheet<NewProjectForm>,
   show_sheet: Rc<Cell<bool>>,
   cancel_sheet: Rc<Cell<bool>>,
@@ -67,6 +97,20 @@ struct StartPage {
   watcher: ThemeWatcher,
   focused: bool,
   bg: Color,
+}
+
+impl StartPage {
+  fn rebuild_rows(&mut self) {
+    self.rows = self
+      .records
+      .iter()
+      .take(MAX_ROWS)
+      .map(|r| project_row(r.display_name(), &r.path))
+      .collect();
+    self.dividers = (0..self.rows.len().saturating_sub(1))
+      .map(|_| HorizontalDivider::new())
+      .collect();
+  }
 }
 
 impl StartPage {
@@ -108,18 +152,29 @@ impl StartPage {
           .on_press(move || show_pressed.set(true)),
       );
 
-    // The recents box starts empty: no example projects, only a dim
-    // placeholder line. Rows are added here once projects exist.
-    let empty_label = BasicText::new(lang::t("recent.empty"))
+    // Saved projects survive restarts (CoreData); a missing store
+    // simply means no projects yet.
+    let records = match load_projects() {
+      Ok(records) => records,
+      Err(err) => {
+        eprintln!("projects: {err}");
+        Vec::new()
+      }
+    };
+
+    // The recents box starts empty when nothing was created yet: only
+    // a dim placeholder line. Rows are added here once projects exist.
+    let empty_label = BasicText::new(lang::t("project.empty"))
       .style(TextStyle::Callout)
       .foreground(TextForeground::Secondary)
       .alignment(TextAlignment::Center)
       .width(CONTENT_WIDTH - 32.0);
 
-    let sheet = BasicSheet::new(NewProjectForm::new(cancel_sheet.clone()))
+    let created = Rc::new(RefCell::new(None));
+    let sheet = BasicSheet::new(NewProjectForm::new(cancel_sheet.clone(), created.clone()))
       .size(SheetSize::Small);
 
-    Self {
+    let mut page = Self {
       close_bar,
       close_requested,
       icon: FileImage::new(app_icon, ICON_PX, ICON_PX)
@@ -128,9 +183,14 @@ impl StartPage {
       title,
       version,
       actions,
+      records,
+      rows: Vec::new(),
+      dividers: Vec::new(),
       empty_label,
       box_bg: RoundedRectangle::new(CONTENT_WIDTH, RECENTS_BOX_H, 12.0)
         .fill(BUTTON_BG_DARK),
+      selection_bg: RoundedRectangle::new(CONTENT_WIDTH, ROW_H, 8.0)
+        .fill(Color::from_rgb8(0x00, 0x7a, 0xff)),
       sheet,
       show_sheet,
       cancel_sheet,
@@ -138,7 +198,9 @@ impl StartPage {
       watcher: ThemeWatcher::new(),
       focused: true,
       bg: TontooUI::renderer::window::BACKGROUND,
-    }
+    };
+    page.rebuild_rows();
+    page
   }
 
   fn each_action_button(&mut self, mut f: impl FnMut(&mut Button)) {
@@ -193,8 +255,52 @@ impl App for StartPage {
       BUTTON_BG_LIGHT
     }));
     self.box_bg.set_focused(focused);
+    self.selection_bg.set_fill(ShapeFill::Solid(palette.accent));
+    self.selection_bg.set_focused(focused);
     self.empty_label.set_theme(theme.mode);
     self.empty_label.set_focused(focused);
+
+    // Project rows: first row is selected (white text/icon on the
+    // accent fill), the rest follow the theme. Display only for now:
+    // no click handling, no open action yet.
+    for (index, row) in self.rows.iter_mut().enumerate() {
+      let selected = index == 0;
+      if let Some(symbol) = row.child_mut::<SFSymbolImage>(0) {
+        if selected {
+          symbol.set_color(Some(Color::WHITE));
+        } else {
+          symbol.set_color(None);
+          symbol.set_theme(palette.text, dark);
+        }
+        symbol.set_focused(focused);
+      }
+      if let Some(texts) = row.child_mut::<VStack>(1) {
+        if let Some(name) = texts.child_mut::<BasicText>(0) {
+          if selected {
+            name.set_foreground(TextForeground::Color(Color::WHITE));
+          } else {
+            name.set_foreground(TextForeground::Primary);
+            name.set_theme(theme.mode);
+          }
+          name.set_focused(focused);
+        }
+        if let Some(path) = texts.child_mut::<BasicText>(1) {
+          if selected {
+            path.set_foreground(TextForeground::Color(Color::from_rgba8(
+              255, 255, 255, 220,
+            )));
+          } else {
+            path.set_foreground(TextForeground::Secondary);
+            path.set_theme(theme.mode);
+          }
+          path.set_focused(focused);
+        }
+      }
+    }
+    for divider in self.dividers.iter_mut() {
+      divider.set_theme(palette.divider, dark);
+      divider.set_focused(focused);
+    }
 
     // New-project sheet: live theme plus derived form state (bundle
     // identifier preview, locale switching). Open/close requests from
@@ -208,6 +314,15 @@ impl App for StartPage {
     }
     if self.cancel_sheet.take() {
       self.sheet.dismiss();
+    }
+    // A freshly scaffolded project joins the recents box; the form
+    // resets once the sheet is fully gone.
+    if let Some(record) = self.sheet.child_mut().take_created() {
+      self.records.push(record);
+      self.rebuild_rows();
+    }
+    if !self.sheet.is_visible() {
+      self.sheet.child_mut().reset();
     }
 
     // Layout: close button top left, everything else centered below.
@@ -239,19 +354,44 @@ impl App for StartPage {
     self.actions.draw(scene, fonts, images);
     cy += actions_h + 14.0;
 
-    // Empty recents box with a centered dim placeholder line.
+    // Recents box: saved projects on top of the accent-selected first
+    // row, or a centered dim placeholder when nothing exists yet.
     let bx = center(CONTENT_WIDTH);
     self.box_bg.place(fonts, bx, cy, CONTENT_WIDTH, RECENTS_BOX_H);
     self.box_bg.draw(scene, fonts, images);
-    let (empty_w, empty_h) = self.empty_label.measure(fonts);
-    self.empty_label.place(
-      fonts,
-      bx + ((CONTENT_WIDTH - empty_w) / 2.0).max(0.0),
-      cy + ((RECENTS_BOX_H - empty_h) / 2.0).max(0.0),
-      empty_w,
-      empty_h,
-    );
-    self.empty_label.draw(scene, fonts, images);
+    if self.rows.is_empty() {
+      let (empty_w, empty_h) = self.empty_label.measure(fonts);
+      self.empty_label.place(
+        fonts,
+        bx + ((CONTENT_WIDTH - empty_w) / 2.0).max(0.0),
+        cy + ((RECENTS_BOX_H - empty_h) / 2.0).max(0.0),
+        empty_w,
+        empty_h,
+      );
+      self.empty_label.draw(scene, fonts, images);
+    } else {
+      self.selection_bg.place(
+        fonts,
+        bx + BOX_PAD,
+        cy + BOX_PAD,
+        CONTENT_WIDTH - BOX_PAD * 2.0,
+        ROW_H,
+      );
+      self.selection_bg.draw(scene, fonts, images);
+      let row_w = CONTENT_WIDTH - BOX_PAD * 2.0 - ROW_PAD_X * 2.0;
+      let mut ry = cy + BOX_PAD;
+      for (index, row) in self.rows.iter_mut().enumerate() {
+        row.place(fonts, bx + BOX_PAD + ROW_PAD_X, ry, row_w, ROW_H);
+        row.draw(scene, fonts, images);
+        ry += ROW_H;
+        if index < self.dividers.len() {
+          let divider = &mut self.dividers[index];
+          divider.place(fonts, bx + BOX_PAD + ROW_PAD_X, ry, row_w, 1.0);
+          divider.draw(scene, fonts, images);
+          ry += 1.0;
+        }
+      }
+    }
 
     // Modal new-project sheet on top: dims the start page, fades in.
     self.sheet.draw(scene, fonts, images);

@@ -5,12 +5,14 @@ card on Vello/WGPU (~25% smaller than the Apple reference) with no
 traffic lights (one round toolbar button with an `xmark` glyph closes
 the window), the centered 90px app icon from `Resources/icon.tico`
 rendered through CoreIcon in its normal (light) variant, the `Xcode`
-title with a `Version 27.0` line, two example capsule buttons and an
-empty recents box. `New Project` opens a modal options sheet on top
+title with a `Version 27.0` line, two example capsule buttons and a
+project list. `New Project` opens a modal options sheet on top
 (EN/DE app name, version, bundle ID, live bundle identifier preview,
-`Cancel` / `Create`). It follows the live system color scheme through
-`ThemeWatcher` and loads `en_us`/`de_de` strings from `lang/` via
-Accessibility.
+folder chooser, `Cancel` / `Create`): `Create` scaffolds a real app
+skeleton on disk and stores the project in CoreData, so it survives
+restarts. The list shows `No Projects` while empty. It follows the
+live system color scheme through `ThemeWatcher` and loads
+`en_us`/`de_de` strings from `lang/` via Accessibility.
 
 - Repository: https://github.com/TontooOS/TontooOS
 - License: TCL v27.0
@@ -23,6 +25,7 @@ Accessibility.
 | Main index | [MAIN.md](MAIN.md) | This page |
 | Rules | [RULE.md](RULE.md) | Development and usage rules |
 | StartPage | [StartPage.md](StartPage.md) | Start window layout, CoreIcon icon pipeline, resources and localization |
+| Projects | [Projects.md](Projects.md) | CoreData project store, scaffold generator, folder chooser flow |
 
 ## Quick Start
 
@@ -44,3 +47,4 @@ See [StartPage.md](StartPage.md) for details.
 - 2026-09-29: Full-window background drag (press anywhere drags the app, releases over controls still click).
 - 2026-09-29: Removed the `Clone...` button; `New Project` is a plain label without chevron icon.
 - 2026-09-29: Empty recents box by default plus modal new-project sheet (EN/DE name switch, version, bundle ID, live `{org}.{english_name}` preview, `Cancel` closes, `Create` is an example).
+- 2026-09-29: Real project creation (folder chooser from `~/Documents`, scaffold with `Cargo.toml`/`tontoo.proj`/`.gitignore`/`src`/`Resources`/`lang`, CoreData `Project` records, `No Projects` placeholder, first row selected).

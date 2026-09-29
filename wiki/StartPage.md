@@ -6,9 +6,10 @@ traffic lights. The only chrome at the top is a single round
 `BasicToolbar` pill with one `xmark` icon that closes the window. Below
 it, the app icon from `Resources/icon.tico` shows centered at 90px,
 followed by the bold `Xcode` title, a `Version 27.0` line, two example
-capsule buttons and an empty recents box. `New Project` opens a modal
-options sheet on top (see `## NewProject Sheet`); the start page stays
-visible behind the dimmed backdrop.
+capsule buttons and a project list (`No Projects` while empty).
+`New Project` opens a modal options sheet on top (see
+`## NewProject Sheet`); the start page stays visible behind the dimmed
+backdrop.
 
 ## Layout
 
@@ -26,7 +27,7 @@ const WINDOW_HEIGHT: u32 = 585;
 | `title` | `BasicText` | `app.title` in `TextStyle::Headline` (17 semibold), centered |
 | `version` | `BasicText` | `app.version` in `TextStyle::Caption` with `TextForeground::Secondary`, centered |
 | `actions` | `HStack` | Two capsule `Button` elements: `action.open`, `action.new_project` (plain label, no icon); example `on_press` handlers only print |
-| `recents` | `RoundedRectangle` + `BasicText` | 330x255 container (`BUTTON_BG_DARK` / `BUTTON_BG_LIGHT`), empty by default with a centered dim `recent.empty` placeholder line |
+| `recents` | `RoundedRectangle` + rows | 330x255 container (`BUTTON_BG_DARK` / `BUTTON_BG_LIGHT`); saved CoreData projects as 48px rows (folder symbol, `Caption` name + `Caption2` path, first row accent-selected, up to 4 shown, display only), or a centered dim `project.empty` (`No Projects`) line while empty |
 | `sheet` | `BasicSheet<NewProjectForm>` | Modal options card (`SheetSize::Small`, 380x266) over the dimmed start page; opened by `New Project`, closed by `Cancel` or ESC (see `## NewProject Sheet`) |
 
 ### Rules
@@ -39,8 +40,10 @@ const WINDOW_HEIGHT: u32 = 585;
   ever sees `mouse_down`; `mouse_up` synthesizes down+up at the release
   position instead, so releasing over the close pill or an action button
   fires it while releasing anywhere else (a real drag) does nothing.
-- The recents box is display-only and empty by default: a centered dim
-  `recent.empty` line, no rows, no click handling.
+- The recents box is display-only: saved projects from CoreData (see
+  [Projects.md](Projects.md)), first row accent-selected, no click
+  handling and no open action yet. While empty it shows the centered
+  dim `project.empty` line.
 - The drag region is the whole window (`(0, 0, 420, 585)`) while no
   sheet is up, so a press anywhere on the background drags the app. A
   press inside the drag region starts a system drag instead of a click,
@@ -60,9 +63,11 @@ const WINDOW_HEIGHT: u32 = 585;
 
 ## NewProject Sheet
 
-`sheet::NewProjectForm` is the fixed 380x266 card content inside the
-`BasicSheet`: title, EN/DE locale switch, name/version/bundle ID
-fields, live bundle identifier preview and the button row.
+`sheet::NewProjectForm` is the card content inside the `BasicSheet`
+with two steps. Step 1 is the fixed 380x292 options form: title, EN/DE
+locale switch, name/version/bundle ID fields, live bundle identifier
+preview, error line and the button row. Step 2 is a dynamically sized
+folder chooser (see [Projects.md](Projects.md)).
 
 ```rust
 pub fn update(&mut self, accent: Color, dark: bool, mode: ThemeMode, focused: bool)
@@ -78,7 +83,9 @@ pub fn update(&mut self, accent: Color, dark: bool, mode: ThemeMode, focused: bo
 | `version` | `BasicTextField` | `sheet.app_version` label plus version field (placeholder `sheet.ph_version`) |
 | `org` | `BasicTextField` | `sheet.bundle_id` label plus organization field, prefilled with `de.arlomu` |
 | `preview` | `BasicText` | Live `{org}.{english_name}` line (`Caption`, `Secondary`); shows `AppName` while the English name is empty and `de.arlomu` while the org is empty; English only |
+| `error` | `BasicText` | Red `Caption` hint (`sheet.err_*`) after failed validation; empty otherwise |
 | `buttons` | `HStack` | `Cancel` left, `Create` right (capsule `Button` elements) |
+| `chooser` | step 2 | `location.title`, current path line, `..` plus up to 8 subdirectory buttons (`Plain` + `folder.fill`), `location.new_folder` target preview, `Cancel` / `Create` row |
 
 ### Rules
 
@@ -87,7 +94,9 @@ pub fn update(&mut self, accent: Color, dark: bool, mode: ThemeMode, focused: bo
 - `New Project` raises a flag consumed in `draw`, which calls
   `sheet.show()`. `Cancel` raises a flag consumed the same way, which
   calls `sheet.dismiss()`. ESC also dismisses (handled by
-  `BasicSheet::key`). `Create` is an example and only prints.
+  `BasicSheet::key`). Step 1 `Create` validates and enters the folder
+  chooser; step 2 `Create` scaffolds the project, saves the CoreData
+  record and closes (see [Projects.md](Projects.md)).
 - `App::text` and `App::key` route into the form only while the sheet
   is visible; the I-beam cursor (`CursorKind::Text`) follows field
   selection through a polled flag.
@@ -161,9 +170,13 @@ cargo run
 ```
 
 Prints `open pressed (example)` to stdout when `Open...` is pressed
-(`New Project` opens the options sheet instead). `Create` prints
-`create pressed (example)` and does nothing else. Closing works through
-the `xmark` pill or the sheet `Cancel` button only.
+(`New Project` opens the options sheet instead). Closing works through
+the `xmark` pill or the sheet `Cancel` button only. See
+[Projects.md](Projects.md) for the full create flow.
+
+## Cross References
+
+- [Projects.md](Projects.md) – CoreData store, scaffolding, folder chooser flow
 
 ## Cross References
 

@@ -6,7 +6,7 @@
     "app.version": "Version {version}",
     "action.open": "Öffnen...",
     "action.new_project": "New Project",
-    "recent.empty": "Keine recenten Projekte",
+    "project.empty": "Keine Projekte",
     "sheet.title": "Wähle Optionen für dein neues Projekt:",
     "sheet.app_name": "App-Name:",
     "sheet.app_version": "Version:",
@@ -14,6 +14,11 @@
     "sheet.cancel": "Abbrechen",
     "sheet.create": "Erstellen",
     "sheet.ph_name": "MyApp",
-    "sheet.ph_version": "1.0"
+    "sheet.ph_version": "1.0",
+    "sheet.err_required": "App-Name, Version und Bundle-ID sind erforderlich.",
+    "sheet.err_name": "App-Name muss Buchstaben oder Ziffern enthalten.",
+    "sheet.err_exists": "Ein Ordner mit diesem Namen existiert bereits.",
+    "location.title": "Ort wählen:",
+    "location.new_folder": "Neuer Ordner:"
   }
 }

@@ -4,10 +4,13 @@ The App To Build, Run, Make Apps (AKA Xcode)
 
 Start page: a 420x585 TontooUI card (~25% smaller than the Apple
 reference) with an `xmark` close pill (no traffic lights), the centered
-90px `Resources/icon.tico` (CoreIcon normal variant), example `Open...`
-/ `New Project` buttons and an empty recents box. `New Project` opens a
-modal options sheet (EN/DE app name, version, bundle ID, live bundle
-identifier preview, `Cancel` / `Create`). Run it with:
+90px `Resources/icon.tico` (CoreIcon normal variant), `Open...` /
+`New Project` buttons and a project list (`No Projects` while empty).
+`New Project` opens a modal options sheet (EN/DE app name, version,
+bundle ID, live bundle identifier preview, folder chooser from
+`~/Documents`, `Cancel` / `Create`): `Create` scaffolds a real app
+skeleton on disk and stores the project in CoreData, so it survives
+restarts. Run it with:
 
 ```bash
 cargo run
