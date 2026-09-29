@@ -26,6 +26,7 @@ live system color scheme through `ThemeWatcher` and loads
 | Rules | [RULE.md](RULE.md) | Development and usage rules |
 | StartPage | [StartPage.md](StartPage.md) | Start window layout, CoreIcon icon pipeline, resources and localization |
 | Projects | [Projects.md](Projects.md) | CoreData project store, scaffold generator, folder chooser flow |
+| Editor | [Editor.md](Editor.md) | Example IDE window on the Sidebar element (dead except traffic lights), supervisor processes, double-click handover |
 
 ## Quick Start
 
@@ -52,4 +53,6 @@ See [StartPage.md](StartPage.md) for details.
 - 2026-09-29: Background-only drag (hover-tracked hit test over close pill and buttons, real down/up clicks, no more release synthesis).
 - 2026-09-29: Default bundle ID is `dev.<username>` instead of `de.arlomu`.
 - 2026-09-29: Drag hit test uses the real viewport origin (24px frame margin) instead of `(0, 0)` constants, fixing clicks on the close pill.
+- 2026-09-29: Example editor view (in-process swap via row double-click or after Create, dead except traffic lights, no CLI, no TBuild).
+- 2026-09-29: Persistent supervisor process (start/editor children, env handoff, `OPEN:` protocol, exit 42); editor is a big Sidebar window with dead pills.
 - 2026-09-29: Sheet `Cancel`/`Create` buttons use `SHEET_BUTTON_BG_DARK` in dark mode (`BUTTON_BG_DARK` melts into the sheet card, only the label showed).

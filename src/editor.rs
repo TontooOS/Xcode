@@ -1,0 +1,359 @@
+//! Example project editor window for Xcode (separate big window).
+//!
+//! A static Xcode-like IDE card built on the `Sidebar` element: working
+//! traffic lights (owned by the sidebar), dead `left_button` pills
+//! (sidebar toggle plus Run, no callbacks), a dead file navigator with
+//! one forced-selected file, dead example Swift code plus a dimmed
+//! minimap, breadcrumb and status bar. Everything is display-only
+//! except the traffic lights (close, minimize, maximize).
+//!
+//! Handoff without CLI: the starter sets `XCODE_PROJECT_NAME` on a
+//! spawned copy of this binary and closes its own window at once;
+//! `open_project_window` waits ~600ms first (old window visibly
+//! closes, short gap), then opens the 1100x700 editor fresh.
+
+use crate::TontooUI::elements::{
+  Align, BasicText, HStack, Sidebar, SidebarItem, Spacer, TextForeground,
+  TextStyle, TrafficAction, View, VStack,
+};
+use crate::TontooUI::renderer::window::{App, Viewport, WindowCommand, run};
+use crate::TontooUI::renderer::{FontSystem, ImageLoader};
+use crate::TontooUI::theme::{ThemeMode, ThemeWatcher};
+use crate::lang;
+use crate::scaffold::system_username;
+use vello::Scene;
+use vello::peniko::Color;
+
+/// Env handoff carrying the project name into the editor process.
+pub const PROJECT_ENV: &str = "XCODE_PROJECT_NAME";
+/// Gap between the old window closing and the editor opening.
+const OPEN_DELAY_MS: u64 = 600;
+/// Editor window size: much bigger than the 420x585 start page.
+const EDITOR_W: u32 = 1100;
+const EDITOR_H: u32 = 700;
+/// Navigator file row index (forced selected every frame).
+const FILE_INDEX: usize = 4;
+
+/// File stem rule mirroring the reference: alphanumeric name plus an
+/// `App` suffix unless it already ends in `app` (`test` -> `testApp`,
+/// `MyApp` -> `MyApp`).
+pub fn file_stem(display_name: &str) -> String {
+  let flat: String = display_name
+    .chars()
+    .filter(|c| c.is_ascii_alphanumeric())
+    .collect();
+  if flat.is_empty() {
+    return "MyApp".to_string();
+  }
+  if flat.to_lowercase().ends_with("app") {
+    flat
+  } else {
+    format!("{flat}App")
+  }
+}
+
+fn example_code(file: &str, project: &str, user: &str) -> String {
+  format!(
+    "//  {file}.swift\n//  {project}\n//\n//  Created by {user}.\n//\nimport SwiftUI\n\n@main\nstruct {file}: App {{\n    var body: some Scene {{\n        WindowGroup {{\n            ContentView()\n        }}\n    }}\n}}\n"
+  )
+}
+
+/// Static editor page: breadcrumb, code plus minimap, status bar.
+fn editor_page(breadcrumb: String, code: String, filter: String, status: String) -> VStack {
+  VStack::new()
+    .spacing(8.0)
+    .align(Align::Leading)
+    .child(
+      BasicText::new(breadcrumb)
+        .style(TextStyle::Caption)
+        .foreground(TextForeground::Secondary),
+    )
+    .child(
+      HStack::new()
+        .spacing(8.0)
+        .align(Align::Leading)
+        .child(BasicText::new(code.clone()).style(TextStyle::Footnote))
+        .child(
+          BasicText::new(code)
+            .style(TextStyle::Caption2)
+            .foreground(TextForeground::Secondary)
+            .width(112.0),
+        ),
+    )
+    .child(
+      HStack::new()
+        .spacing(8.0)
+        .align(Align::Center)
+        .child(
+          BasicText::new(filter)
+            .style(TextStyle::Caption)
+            .foreground(TextForeground::Secondary),
+        )
+        .child(Spacer::new())
+        .child(
+          BasicText::new(status)
+            .style(TextStyle::Caption)
+            .foreground(TextForeground::Secondary),
+        ),
+    )
+}
+
+pub struct EditorUi {
+  sidebar: Sidebar,
+  code_width: f32,
+  watcher: ThemeWatcher,
+  focused: bool,
+  bg: Color,
+  command: Option<WindowCommand>,
+}
+
+impl EditorUi {
+  pub fn new(project: &str, user: &str, breadcrumb: String, code: String, filter: String, status: String) -> Self {
+    let file = file_stem(project);
+    let items = vec![
+      SidebarItem::new(project, "folder.fill"),
+      SidebarItem::new("Assets", "folder.fill"),
+      SidebarItem::new("ContentView", "doc.fill"),
+      SidebarItem::new("Info", "doc.fill"),
+      SidebarItem::new(file, "doc.fill"),
+    ];
+    let mut sidebar = Sidebar::new(items)
+      .page(editor_page(breadcrumb.clone(), code.clone(), filter.clone(), status.clone()))
+      .page(editor_page(breadcrumb.clone(), code.clone(), filter.clone(), status.clone()))
+      .page(editor_page(breadcrumb.clone(), code.clone(), filter.clone(), status.clone()))
+      .page(editor_page(breadcrumb.clone(), code.clone(), filter.clone(), status.clone()))
+      .page(editor_page(breadcrumb, code, filter, status))
+      .search_field(false)
+      .toggle_button(false)
+      .left_button(0, "sidebar.left", || {})
+      .left_button(1, "play.fill", || {});
+    sidebar.set_title(format!("{project} › {}", lang::t("ed.device")));
+    sidebar.select(FILE_INDEX);
+    Self {
+      sidebar,
+      code_width: 600.0,
+      watcher: ThemeWatcher::new(),
+      focused: true,
+      bg: crate::TontooUI::renderer::window::BACKGROUND,
+      command: None,
+    }
+  }
+
+  /// Wire one page: theme for all texts plus the code width for the
+  /// current content size.
+  fn wire_page(page: &mut dyn View, mode: ThemeMode, focused: bool, code_w: f32) {
+    let Some(stack) = page.as_any_mut().downcast_mut::<VStack>() else {
+      return;
+    };
+    if let Some(line) = stack.child_mut::<BasicText>(0) {
+      line.set_theme(mode);
+      line.set_focused(focused);
+    }
+    if let Some(row) = stack.child_mut::<HStack>(1) {
+      if let Some(code) = row.child_mut::<BasicText>(0) {
+        code.set_width(Some(code_w));
+        code.set_theme(mode);
+        code.set_focused(focused);
+      }
+      if let Some(mini) = row.child_mut::<BasicText>(1) {
+        mini.set_theme(mode);
+        mini.set_focused(focused);
+      }
+    }
+    if let Some(bar) = stack.child_mut::<HStack>(2) {
+      if let Some(left) = bar.child_mut::<BasicText>(0) {
+        left.set_theme(mode);
+        left.set_focused(focused);
+      }
+      if let Some(right) = bar.child_mut::<BasicText>(2) {
+        right.set_theme(mode);
+        right.set_focused(focused);
+      }
+    }
+  }
+
+  pub fn draw(
+    &mut self,
+    scene: &mut Scene,
+    fonts: &mut FontSystem,
+    images: &mut ImageLoader<'_>,
+    viewport: Viewport,
+    time_secs: f64,
+  ) {
+    self.watcher.poll(time_secs);
+    self.watcher.set_focused(self.focused, time_secs);
+    let palette = self.watcher.palette(time_secs);
+    let theme = self.watcher.theme();
+    let dark = theme.mode == ThemeMode::Dark;
+    let (mode, focused) = (theme.mode, self.focused);
+    self.bg = palette.bg;
+
+    self.sidebar.set_theme(palette.accent, dark);
+    self.sidebar.set_glass(theme.mode, theme.glass);
+    self.sidebar.set_focused(focused);
+    // Dead navigator: the file row stays selected no matter what was
+    // clicked (no `on_select` handler at all).
+    self.sidebar.select(FILE_INDEX);
+    // Code width follows the content size (window is fixed, maximize
+    // still changes the viewport).
+    self.code_width = (viewport.width - 48.0 - self.sidebar.width_value() - 136.0).max(40.0);
+    let code_w = self.code_width;
+    for index in 0..5 {
+      if let Some(page) = self.sidebar.page_mut(index) {
+        Self::wire_page(page, mode, focused, code_w);
+      }
+    }
+
+    // No titlebar: the sidebar owns the decoration (traffic lights
+    // live in it) and fills the whole viewport.
+    self.sidebar.place(fonts, viewport.x, viewport.y, viewport.width, viewport.height);
+    self.sidebar.draw(scene, fonts, images);
+  }
+
+  pub fn background(&self) -> Color {
+    self.bg
+  }
+
+  pub fn wants_backdrop(&self) -> bool {
+    self.sidebar.wants_backdrop()
+  }
+
+  pub fn drag_rect(&self) -> (f32, f32, f32, f32) {
+    self.sidebar.drag_rect()
+  }
+
+  pub fn press_traffic(&mut self, x: f64, y: f64) -> bool {
+    match self.sidebar.press(x, y) {
+      Some(TrafficAction::Close) => self.command = Some(WindowCommand::Close),
+      Some(TrafficAction::Minimize) => self.command = Some(WindowCommand::Minimize),
+      Some(TrafficAction::Maximize) => self.command = Some(WindowCommand::ToggleMaximize),
+      None => return false,
+    }
+    true
+  }
+
+  pub fn poll_command(&mut self) -> Option<WindowCommand> {
+    self.command.take()
+  }
+
+  /// Hover only: traffic light glyphs react, nothing else does.
+  pub fn hover(&mut self, x: f32, y: f32) {
+    self.sidebar.set_hover(x, y);
+  }
+
+  pub fn set_focused(&mut self, focused: bool) {
+    self.focused = focused;
+    self.sidebar.set_focused(focused);
+  }
+}
+
+struct EditorApp {
+  ui: EditorUi,
+  title: String,
+}
+
+impl EditorApp {
+  fn new(project: String) -> Self {
+    let user = system_username();
+    let file = file_stem(&project);
+    let breadcrumb = format!(
+      "{project} › {project} › {file} | {}",
+      lang::t("ed.no_selection")
+    );
+    let code = example_code(&file, &project, &user);
+    let ui = EditorUi::new(
+      &project,
+      &user,
+      breadcrumb,
+      code,
+      lang::t("ed.filter"),
+      lang::t("ed.status"),
+    );
+    Self { ui, title: project }
+  }
+}
+
+impl App for EditorApp {
+  fn draw(
+    &mut self,
+    scene: &mut Scene,
+    fonts: &mut FontSystem,
+    images: &mut ImageLoader<'_>,
+    viewport: Viewport,
+    time_secs: f64,
+  ) {
+    self.ui.draw(scene, fonts, images, viewport, time_secs);
+  }
+
+  fn background(&self) -> Color {
+    self.ui.background()
+  }
+
+  fn wants_backdrop(&self) -> bool {
+    self.ui.wants_backdrop()
+  }
+
+  fn drag_region(&self) -> Option<(f32, f32, f32, f32)> {
+    Some(self.ui.drag_rect())
+  }
+
+  fn poll_window_command(&mut self) -> Option<WindowCommand> {
+    self.ui.poll_command()
+  }
+
+  fn mouse_down(&mut self, x: f64, y: f64) {
+    // Only the traffic lights act; the sidebar pages are dead example
+    // chrome and receive no mouse routing at all.
+    let _ = self.ui.press_traffic(x, y);
+  }
+
+  fn mouse_up(&mut self, _x: f64, _y: f64) {}
+
+  fn mouse_move(&mut self, x: f64, y: f64) {
+    self.ui.hover(x as f32, y as f32);
+  }
+
+  fn set_focused(&mut self, focused: bool) {
+    self.ui.set_focused(focused);
+  }
+}
+
+/// Open the big editor window for a project: waits out the gap after
+/// the starter window closed, then runs fresh (no CLI involved).
+pub fn open_project_window(project: String) {
+  std::thread::sleep(std::time::Duration::from_millis(OPEN_DELAY_MS));
+  let title = project.clone();
+  let app = EditorApp::new(project);
+  if let Err(err) = run(&title, EDITOR_W, EDITOR_H, app) {
+    eprintln!("error: {err}");
+    std::process::exit(1);
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn file_stem_appends_app_once() {
+    assert_eq!(file_stem("test"), "testApp");
+    assert_eq!(file_stem("MyApp"), "MyApp");
+    assert_eq!(file_stem("My App"), "MyApp");
+    assert_eq!(file_stem("  !!!  "), "MyApp");
+  }
+
+  #[test]
+  fn example_code_mentions_names() {
+    let code = example_code("testApp", "test", "arlo");
+    assert!(code.contains("testApp"));
+    assert!(code.contains("Created by arlo"));
+    assert!(code.contains("import SwiftUI"));
+  }
+
+  #[test]
+  fn project_env_key_is_stable() {
+    // The starter and the editor child agree on this key instead of
+    // CLI arguments.
+    assert_eq!(PROJECT_ENV, "XCODE_PROJECT_NAME");
+  }
+}

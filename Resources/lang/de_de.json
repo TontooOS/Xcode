@@ -20,6 +20,10 @@
     "sheet.err_version": "Version muss wie 1.0.0 aussehen.",
     "sheet.err_exists": "Ein Ordner mit diesem Namen existiert bereits.",
     "location.title": "Ort wählen:",
-    "location.new_folder": "Neuer Ordner:"
+    "location.new_folder": "Neuer Ordner:",
+    "ed.device": "My Mac",
+    "ed.no_selection": "Keine Auswahl",
+    "ed.filter": "Filter",
+    "ed.status": "Zeile: 1  Spalte: 1"
   }
 }

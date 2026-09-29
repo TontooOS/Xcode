@@ -10,7 +10,10 @@ reference) with an `xmark` close pill (no traffic lights), the centered
 bundle ID, live bundle identifier preview, folder chooser from
 `~/Documents`, `Cancel` / `Create`): `Create` scaffolds a real app
 skeleton on disk and stores the project in CoreData, so it survives
-restarts. Run it with:
+restarts. Double-click (or finishing `Create`) hands over to a big
+1100x700 example editor built on the `Sidebar` element (dead except
+traffic lights). One persistent main process supervises both windows
+(env handoff, no CLI). Run it with:
 
 ```bash
 cargo run

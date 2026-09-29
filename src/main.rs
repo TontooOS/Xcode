@@ -17,6 +17,7 @@
 //! daemon live through `ThemeWatcher` (Dark `#1B2022` / Light
 //! `#FFFFFF`).
 
+mod editor;
 mod icon;
 mod lang;
 mod projects;
@@ -26,6 +27,7 @@ mod sheet;
 sdk::preinclude!();
 
 use std::cell::{Cell, RefCell};
+use std::io::{BufRead, BufReader};
 use std::rc::Rc;
 
 use TontooUI::elements::{
@@ -42,6 +44,7 @@ use TontooUI::theme::{ThemeMode, ThemeWatcher};
 use vello::Scene;
 use vello::peniko::Color;
 
+use crate::editor::PROJECT_ENV;
 use crate::projects::{ProjectRecord, load_projects};
 use crate::sheet::NewProjectForm;
 
@@ -85,6 +88,17 @@ fn project_row(name: &str, path: &str) -> HStack {
     .child(texts)
 }
 const VERSION: &str = "27.0.0";
+/// Start-child mode marker (no CLI anywhere in this app).
+const MODE_ENV: &str = "XCODE_MODE";
+const MODE_START: &str = "start";
+/// Exit code of the start child when it opened an editor: the
+/// supervisor then runs the editor instead of quitting.
+const OPEN_EXIT: i32 = 42;
+
+/// Supervisor protocol line announcing the project to open.
+fn open_line(name: &str) -> String {
+  format!("OPEN:{name}")
+}
 
 struct StartPage {
   close_bar: BasicToolbar,
@@ -103,6 +117,13 @@ struct StartPage {
   show_sheet: Rc<Cell<bool>>,
   cancel_sheet: Rc<Cell<bool>>,
   sheet_ibeam: Cell<bool>,
+  /// Set when a project opens: the start child reports `OPEN_EXIT`
+  /// after its window closes so the supervisor runs the editor.
+  opened: Rc<Cell<bool>>,
+  /// Selected project row plus placed row rects for tap/double-tap.
+  selected: usize,
+  row_rects: Vec<(f32, f32, f32, f32)>,
+  last_tap: Option<(std::time::Instant, usize)>,
   /// Last cursor position (tracks hover): the drag region is only the
   /// background, so presses over controls reach the app as clicks.
   cursor: Cell<(f32, f32)>,
@@ -213,6 +234,10 @@ impl StartPage {
       show_sheet,
       cancel_sheet,
       sheet_ibeam: Cell::new(false),
+      opened: Rc::new(Cell::new(false)),
+      selected: 0,
+      row_rects: Vec::new(),
+      last_tap: None,
       cursor: Cell::new((-1.0, -1.0)),
       viewport: Cell::new((0.0, 0.0, WINDOW_WIDTH as f32, WINDOW_HEIGHT as f32)),
       action_rects: Vec::new(),
@@ -230,6 +255,21 @@ impl StartPage {
         f(button);
       }
     }
+  }
+
+  /// Opened flag for the exit code: clone before `run` moves the app.
+  fn opened_flag(&self) -> Rc<Cell<bool>> {
+    self.opened.clone()
+  }
+
+  /// Report an opened project to the supervisor and close this
+  /// window at once: the supervisor runs the big editor next. Piped
+  /// stdout is block-buffered, so the line is flushed explicitly.
+  fn emit_open(&self, name: &str) {
+    println!("{}", open_line(name));
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    self.opened.set(true);
+    self.close_requested.set(true);
   }
 }
 
@@ -281,11 +321,11 @@ impl App for StartPage {
     self.empty_label.set_theme(theme.mode);
     self.empty_label.set_focused(focused);
 
-    // Project rows: first row is selected (white text/icon on the
-    // accent fill), the rest follow the theme. Display only for now:
-    // no click handling, no open action yet.
+    // Project rows: the selected row shows white text/icon on the
+    // accent fill, the rest follow the theme. Single tap selects,
+    // double tap opens the example editor (no open action beyond that).
     for (index, row) in self.rows.iter_mut().enumerate() {
-      let selected = index == 0;
+      let selected = index == self.selected;
       if let Some(symbol) = row.child_mut::<SFSymbolImage>(0) {
         if selected {
           symbol.set_color(Some(Color::WHITE));
@@ -336,11 +376,15 @@ impl App for StartPage {
     if self.cancel_sheet.take() {
       self.sheet.dismiss();
     }
-    // A freshly scaffolded project joins the recents box; the form
-    // resets once the sheet is fully gone.
+    // A freshly scaffolded project joins the list, then hands over
+    // to the supervisor: big example editor next, this window closes
+    // at once.
     if let Some(record) = self.sheet.child_mut().take_created() {
+      let name = record.display_name().to_string();
       self.records.push(record);
       self.rebuild_rows();
+      self.selected = self.rows.len().saturating_sub(1);
+      self.emit_open(&name);
     }
     if !self.sheet.is_visible() {
       self.sheet.child_mut().reset();
@@ -396,19 +440,22 @@ impl App for StartPage {
       );
       self.empty_label.draw(scene, fonts, images);
     } else {
+      let sel = self.selected.min(self.rows.len().saturating_sub(1));
       self.selection_bg.place(
         fonts,
         bx + BOX_PAD,
-        cy + BOX_PAD,
+        cy + BOX_PAD + sel as f32 * (ROW_H + 1.0),
         CONTENT_WIDTH - BOX_PAD * 2.0,
         ROW_H,
       );
       self.selection_bg.draw(scene, fonts, images);
       let row_w = CONTENT_WIDTH - BOX_PAD * 2.0 - ROW_PAD_X * 2.0;
       let mut ry = cy + BOX_PAD;
+      let mut rects = Vec::new();
       for (index, row) in self.rows.iter_mut().enumerate() {
         row.place(fonts, bx + BOX_PAD + ROW_PAD_X, ry, row_w, ROW_H);
         row.draw(scene, fonts, images);
+        rects.push((bx + BOX_PAD, ry, CONTENT_WIDTH - BOX_PAD * 2.0, ROW_H));
         ry += ROW_H;
         if index < self.dividers.len() {
           let divider = &mut self.dividers[index];
@@ -417,6 +464,7 @@ impl App for StartPage {
           ry += 1.0;
         }
       }
+      self.row_rects = rects;
     }
 
     // Modal new-project sheet on top: dims the start page, fades in.
@@ -435,10 +483,10 @@ impl App for StartPage {
 
   fn drag_region(&self) -> Option<(f32, f32, f32, f32)> {
     // Background drag only: an open sheet needs every press for its
-    // fields, and presses over the close pill or the action buttons
-    // must reach the app as clicks instead of starting a drag. The
-    // renderer polls this on every press, so the hover-tracked cursor
-    // position decides.
+    // fields, and presses over the close pill, the action buttons or
+    // a project row must reach the app as clicks instead of starting
+    // a drag. The renderer polls this on every press, so the
+    // hover-tracked cursor position decides.
     if self.sheet.is_visible() {
       return None;
     }
@@ -448,6 +496,9 @@ impl App for StartPage {
       return None;
     }
     if self.action_rects.iter().any(|r| hit_rect(*r, mx, my)) {
+      return None;
+    }
+    if self.row_rects.iter().any(|r| hit_rect(*r, mx, my)) {
       return None;
     }
     Some((vx, vy, vw, vh))
@@ -479,6 +530,29 @@ impl App for StartPage {
     }
     self.close_bar.mouse_up(x, y);
     self.each_action_button(|button| button.mouse_up(x, y));
+    // Project rows: single tap selects, double tap opens the example
+    // editor (450ms window on the same row).
+    let now = std::time::Instant::now();
+    let mut hit: Option<usize> = None;
+    for (index, rect) in self.row_rects.iter().enumerate() {
+      if hit_rect(*rect, x as f32, y as f32) {
+        hit = Some(index);
+        break;
+      }
+    }
+    if let Some(index) = hit {
+      let double = matches!(self.last_tap, Some((at, i)) if i == index && now.duration_since(at).as_millis() < 450);
+      self.last_tap = Some((now, index));
+      self.selected = index;
+      // Double tap: hand over to the supervisor (big example editor
+      // next), this window closes at once.
+      if double {
+        if let Some(record) = self.records.get(index) {
+          let name = record.display_name().to_string();
+          self.emit_open(&name);
+        }
+      }
+    }
   }
 
   fn mouse_move(&mut self, x: f64, y: f64) {
@@ -528,12 +602,76 @@ impl App for StartPage {
 
 fn main() {
   lang::init();
+  // Editor handoff without CLI: a spawned copy carries the project
+  // name in the environment, waits out the gap, then opens big.
+  if let Ok(name) = std::env::var(PROJECT_ENV) {
+    let name = name.trim().to_string();
+    if !name.is_empty() {
+      editor::open_project_window(name);
+      return;
+    }
+  }
+  // Start window child (spawned by the supervisor below).
+  if std::env::var(MODE_ENV).as_deref() == Ok(MODE_START) {
+    run_start();
+    return;
+  }
+  // Default: persistent main process supervising both windows.
+  supervise();
+}
+
+fn run_start() {
   let app_icon = icon::display_icon();
   let app = StartPage::new(app_icon);
+  let opened = app.opened_flag();
   if let Err(err) = run("Xcode", WINDOW_WIDTH, WINDOW_HEIGHT, app) {
     eprintln!("error: {err}");
     std::process::exit(1);
   }
+  std::process::exit(if opened.get() { OPEN_EXIT } else { 0 });
+}
+
+/// Persistent main process without windows: runs the start child,
+/// then the editor child on `OPEN:`, and stays alive across the
+/// handover. The editor exit code becomes ours; quitting the start
+/// window quits the app.
+fn supervise() -> ! {
+  use std::process::{Command, Stdio};
+  let exe = std::env::current_exe().unwrap_or_else(|_| "xcode".into());
+  let mut start = match Command::new(&exe)
+    .env(MODE_ENV, MODE_START)
+    .stdout(Stdio::piped())
+    .spawn()
+  {
+    Ok(child) => child,
+    Err(err) => {
+      eprintln!("cannot start: {err}");
+      std::process::exit(1);
+    }
+  };
+  let mut opened: Option<String> = None;
+  if let Some(out) = start.stdout.take() {
+    for line in BufReader::new(out).lines().map_while(Result::ok) {
+      if let Some(name) = line.strip_prefix("OPEN:") {
+        opened = Some(name.to_string());
+      } else {
+        println!("{line}");
+      }
+    }
+  }
+  let code = start.wait().ok().and_then(|s| s.code()).unwrap_or(1);
+  if code == OPEN_EXIT {
+    if let Some(name) = opened.filter(|n| !n.trim().is_empty()) {
+      match Command::new(&exe).env(PROJECT_ENV, name).status() {
+        Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+        Err(err) => {
+          eprintln!("cannot open editor: {err}");
+          std::process::exit(1);
+        }
+      }
+    }
+  }
+  std::process::exit(code);
 }
 
 #[cfg(test)]
@@ -547,5 +685,13 @@ mod tests {
     assert!(hit_rect((10.0, 10.0, 20.0, 20.0), 20.0, 20.0));
     assert!(!hit_rect((10.0, 10.0, 20.0, 20.0), 9.9, 15.0));
     assert!(!hit_rect((10.0, 10.0, 20.0, 20.0), 15.0, 30.1));
+  }
+
+  #[test]
+  fn supervisor_protocol_is_stable() {
+    // Starter and supervisor agree on these instead of CLI args.
+    assert_eq!(open_line("MyApp"), "OPEN:MyApp");
+    assert_eq!(OPEN_EXIT, 42);
+    assert_eq!(MODE_START, "start");
   }
 }
