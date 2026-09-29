@@ -62,6 +62,7 @@ See [StartPage.md](StartPage.md) for details.
 - 2026-09-29: Device menu rows carry PNG icons (`MenuItem::icon`, new TontooUI API via CoreImage; `wrench.png` still missing, falls back to plain label).
 - 2026-09-29: Device menu button is transparent over a longer empty glass pill (`NestedMenu::transparent_button`).
 - 2026-09-29: No content title; chevrons moved to the content left, collapse stays far right.
+- 2026-09-29: Device menu text at 15px (`NestedMenu::button_font`) plus a divider between topbar pills and editor.
 - 2026-09-29: Single Run/Stop pair at the sidebar top right edge (left pill removed).
 - 2026-09-29: Sidebar labels follow the theme via `set_item_text(None)` (element defaults to hand-set white, unreadable in light mode).
 - 2026-09-29: Content topbar (centered device `NestedMenu` with Devices/Build/Utilities sections, dead chevron pair, dead far-right collapse pill; all example).

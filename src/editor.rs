@@ -15,9 +15,9 @@
 //! `open_project_window` waits ~600ms first (old window visibly
 //! closes, short gap), then opens the 1100x700 editor fresh.
 use crate::TontooUI::elements::{
-  Align, BasicText, BasicToolbar, FileImage, HStack, MenuItem, NestedMenu,
-  SearchField, Sidebar, SidebarItem, Spacer, TextForeground, TextStyle,
-  ToolbarItem, TrafficAction, View, VStack,
+  Align, BasicText, BasicToolbar, FileImage, HStack, HorizontalDivider,
+  MenuItem, NestedMenu, SearchField, Sidebar, SidebarItem, Spacer,
+  TextForeground, TextStyle, ToolbarItem, TrafficAction, View, VStack,
 };
 use crate::TontooUI::renderer::window::{App, CursorKind, Key, Viewport, WindowCommand, run};
 use crate::TontooUI::renderer::{FontSystem, ImageLoader};
@@ -147,6 +147,8 @@ fn editor_page(breadcrumb: String, code: String, filter: String, status: String)
 pub struct EditorUi {
   sidebar: Sidebar,
   search: SearchField,
+  /// Divider between the topbar pills and the editor below.
+  top_div: HorizontalDivider,
   /// Dead Run/Stop pair at the sidebar top right edge (hover/press
   /// tint only, no callbacks).
   run_stop: BasicToolbar,
@@ -199,6 +201,7 @@ impl EditorUi {
     Self {
       sidebar,
       search: SearchField::new(lang::t("ed.search")),
+      top_div: HorizontalDivider::new(),
       run_stop: BasicToolbar::from_items(vec![
         ToolbarItem::icon("play.fill"),
         ToolbarItem::divider(),
@@ -220,7 +223,8 @@ impl EditorUi {
         ],
       )
       .on_action(|path| println!("device menu {path:?} (example)"))
-      .transparent_button(true),
+      .transparent_button(true)
+      .button_font(15.0),
       menu_glass: BasicToolbar::new(),
       chev: BasicToolbar::from_items(vec![
         ToolbarItem::icon("chevron.left"),
@@ -290,6 +294,8 @@ impl EditorUi {
     self.sidebar.set_focused(focused);
     self.search.set_theme(theme.mode, palette.accent, theme.glass);
     self.search.set_focused(focused);
+    self.top_div.set_theme(palette.divider, dark);
+    self.top_div.set_focused(focused);
     self.run_stop.set_theme(theme.mode, theme.glass);
     self.run_stop.set_focused(focused);
     self.computer.set_theme(dark);
@@ -349,6 +355,9 @@ impl EditorUi {
     self.chev.draw(scene, fonts, images);
     self.collapse_btn.place(fonts, right - SEARCH_PAD - 36.0, viewport.y + 14.0, 36.0, 36.0);
     self.collapse_btn.draw(scene, fonts, images);
+    // Divider between the topbar pills above and the editor below.
+    self.top_div.place(fonts, content_x + SEARCH_PAD, viewport.y + 54.0, content_w - SEARCH_PAD * 2.0, 1.0);
+    self.top_div.draw(scene, fonts, images);
     let col_w = self.sidebar.width_value();
     // Dead Run/Stop pair at the sidebar top right edge, vertically
     // centered on the traffic lights row like the old pills.
@@ -456,6 +465,7 @@ impl EditorUi {
     self.focused = focused;
     self.sidebar.set_focused(focused);
     self.search.set_focused(focused);
+    self.top_div.set_focused(focused);
     self.run_stop.set_focused(focused);
     self.device.set_focused(focused);
     self.menu_glass.set_focused(focused);
