@@ -51,4 +51,5 @@ See [StartPage.md](StartPage.md) for details.
 - 2026-09-29: Scaffold generates lowercase `src/content_view.rs` (Linux module resolution) with trimmed template imports, `Resources/lang/` runtime mirror next to build-input `lang/`, Xcode version line shows `27.0.0`.
 - 2026-09-29: Background-only drag (hover-tracked hit test over close pill and buttons, real down/up clicks, no more release synthesis).
 - 2026-09-29: Default bundle ID is `dev.<username>` instead of `de.arlomu`.
+- 2026-09-29: Drag hit test uses the real viewport origin (24px frame margin) instead of `(0, 0)` constants, fixing clicks on the close pill.
 - 2026-09-29: Sheet `Cancel`/`Create` buttons use `SHEET_BUTTON_BG_DARK` in dark mode (`BUTTON_BG_DARK` melts into the sheet card, only the label showed).

@@ -57,9 +57,10 @@ const ROW_PAD_X: f32 = 9.0;
 const BOX_PAD: f32 = 6.0;
 /// Visible project rows without scrolling (display only for now).
 const MAX_ROWS: usize = 4;
-/// Close pill geometry: matches its placement in `draw`.
-const CLOSE_X: f32 = 12.0;
-const CLOSE_Y: f32 = 12.0;
+/// Close pill geometry: 12px offset inside the viewport plus its size.
+/// The viewport itself starts at a 24px frame margin, so these must be
+/// added to the real viewport origin every frame (never constants).
+const CLOSE_OFF: f32 = 12.0;
 const CLOSE_S: f32 = 36.0;
 
 fn hit_rect(rect: (f32, f32, f32, f32), x: f32, y: f32) -> bool {
@@ -105,6 +106,10 @@ struct StartPage {
   /// Last cursor position (tracks hover): the drag region is only the
   /// background, so presses over controls reach the app as clicks.
   cursor: Cell<(f32, f32)>,
+  /// Real viewport rect from the last frame: the renderer draws inside
+  /// a 24px frame margin, so hit tests and the region must use this
+  /// origin instead of (0, 0).
+  viewport: Cell<(f32, f32, f32, f32)>,
   /// Placed button rects from the last frame for the hit test above.
   action_rects: Vec<(f32, f32, f32, f32)>,
   watcher: ThemeWatcher,
@@ -209,6 +214,7 @@ impl StartPage {
       cancel_sheet,
       sheet_ibeam: Cell::new(false),
       cursor: Cell::new((-1.0, -1.0)),
+      viewport: Cell::new((0.0, 0.0, WINDOW_WIDTH as f32, WINDOW_HEIGHT as f32)),
       action_rects: Vec::new(),
       watcher: ThemeWatcher::new(),
       focused: true,
@@ -342,8 +348,9 @@ impl App for StartPage {
 
     // Layout: close button top left, everything else centered below.
     let (vx, vy, vw, vh) = (viewport.x, viewport.y, viewport.width, viewport.height);
+    self.viewport.set((vx, vy, vw, vh));
     self.sheet.set_viewport(vx, vy, vw, vh);
-    self.close_bar.place(fonts, vx + 12.0, vy + 12.0, 36.0, 36.0);
+    self.close_bar.place(fonts, vx + CLOSE_OFF, vy + CLOSE_OFF, CLOSE_S, CLOSE_S);
     self.close_bar.draw(scene, fonts, images);
 
     let mut cy = vy + 60.0;
@@ -436,13 +443,14 @@ impl App for StartPage {
       return None;
     }
     let (mx, my) = self.cursor.get();
-    if hit_rect((CLOSE_X, CLOSE_Y, CLOSE_S, CLOSE_S), mx, my) {
+    let (vx, vy, vw, vh) = self.viewport.get();
+    if hit_rect((vx + CLOSE_OFF, vy + CLOSE_OFF, CLOSE_S, CLOSE_S), mx, my) {
       return None;
     }
     if self.action_rects.iter().any(|r| hit_rect(*r, mx, my)) {
       return None;
     }
-    Some((0.0, 0.0, WINDOW_WIDTH as f32, WINDOW_HEIGHT as f32))
+    Some((vx, vy, vw, vh))
   }
 
   fn poll_window_command(&mut self) -> Option<WindowCommand> {

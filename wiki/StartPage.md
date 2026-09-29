@@ -48,7 +48,10 @@ const WINDOW_HEIGHT: u32 = 585;
   press, and the hover-tracked cursor decides. Over the close pill or
   an action button (placed rects from the last frame) it returns `None`
   so the press reaches the app as a real down/up click; anywhere else
-  it returns the full window and the press starts a system drag.
+  inside the viewport it returns the viewport rect and the press starts
+  a system drag. All geometry derives from the real viewport origin
+  (the renderer draws inside a 24px frame margin), never from `(0, 0)`
+  constants.
 - An open sheet disables the drag region (`None`): every press reaches
   the form fields, and dragging pauses until `Cancel` or ESC.
 - Action buttons use `set_palette` (`BUTTON_BG_DARK`/`WHITE` in dark
