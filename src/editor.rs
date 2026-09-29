@@ -187,7 +187,10 @@ impl EditorUi {
       .search_field(false)
       .toggle_button(false)
       .collapsible(false);
-    sidebar.set_title(format!("{project} › {}", lang::t("ed.device")));
+    // No content title (neither scheme nor item label): the topbar
+    // holds chevrons left, the device menu center and the collapse
+    // pill right instead.
+    sidebar.set_title(String::new());
     sidebar.select(FILE_INDEX);
     // The element defaults item labels to hand-set white, which wins
     // over the theme in light mode: clear the override once so labels
@@ -342,7 +345,7 @@ impl EditorUi {
     self.device.place(fonts, group_x + DEVICE_ICON + DEVICE_GAP, viewport.y + 14.0, menu_w, menu_h);
     self.device.draw(scene, fonts, images);
     let (chev_w, _) = self.chev.measure(fonts);
-    self.chev.place(fonts, right - SEARCH_PAD - 36.0 - SEARCH_PAD - chev_w, viewport.y + 14.0, chev_w, 36.0);
+    self.chev.place(fonts, content_x + SEARCH_PAD, viewport.y + 14.0, chev_w, 36.0);
     self.chev.draw(scene, fonts, images);
     self.collapse_btn.place(fonts, right - SEARCH_PAD - 36.0, viewport.y + 14.0, 36.0, 36.0);
     self.collapse_btn.draw(scene, fonts, images);
