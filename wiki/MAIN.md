@@ -13,7 +13,7 @@ empty recents box. `New Project` opens a modal options sheet on top
 Accessibility.
 
 - Repository: https://github.com/TontooOS/TontooOS
-- License: TCL v26.1
+- License: TCL v27.0
 - Version: 27.0.0
 
 ## Feature Index
