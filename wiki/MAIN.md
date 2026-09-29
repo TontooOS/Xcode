@@ -68,3 +68,4 @@ See [StartPage.md](StartPage.md) for details.
 - 2026-09-29: Content topbar (device `NestedMenu` with Devices/Build/Utilities sections, dead chevron pair left; all example).
 - 2026-09-29: Collapse button removed; device group centered on the window; picked menu row reflects on top (label plus icon, display only).
 - 2026-09-29: Sheet `Cancel`/`Create` buttons use `SHEET_BUTTON_BG_DARK` in dark mode (`BUTTON_BG_DARK` melts into the sheet card, only the label showed).
+- 2026-09-29: Minimap removed, code uses the full content width.

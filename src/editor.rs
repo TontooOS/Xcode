@@ -4,8 +4,8 @@
 //! traffic lights (owned by the sidebar), a dead Run/Stop pill pair at
 //! the sidebar top right (no callbacks), a non-collapsible file
 //! navigator with one preselected file, a functionless search capsule
-//! stretched across the sidebar bottom, dead example Swift code plus a
-//! dimmed minimap, breadcrumb and status bar. The element feels alive (hover, press states,
+//! stretched across the sidebar bottom, dead example Swift code,
+//! breadcrumb and status bar. The element feels alive (hover, press states,
 //! selection, resize) but clicks trigger no actions: there are no
 //! callbacks, all pages are identical and nothing is ever saved, built
 //! or run.
@@ -107,7 +107,7 @@ fn png(file: &str) -> String {
   resource_path(file).to_string_lossy().to_string()
 }
 
-/// Static editor page: breadcrumb, code plus minimap, status bar.
+/// Static editor page: breadcrumb, code, status bar.
 fn editor_page(breadcrumb: String, code: String, filter: String, status: String) -> VStack {
   VStack::new()
     .spacing(8.0)
@@ -117,18 +117,7 @@ fn editor_page(breadcrumb: String, code: String, filter: String, status: String)
         .style(TextStyle::Caption)
         .foreground(TextForeground::Secondary),
     )
-    .child(
-      HStack::new()
-        .spacing(8.0)
-        .align(Align::Leading)
-        .child(BasicText::new(code.clone()).style(TextStyle::Footnote))
-        .child(
-          BasicText::new(code)
-            .style(TextStyle::Caption2)
-            .foreground(TextForeground::Secondary)
-            .width(112.0),
-        ),
-    )
+    .child(BasicText::new(code).style(TextStyle::Footnote))
     .child(
       HStack::new()
         .spacing(8.0)
@@ -291,16 +280,10 @@ impl EditorUi {
       line.set_theme(mode);
       line.set_focused(focused);
     }
-    if let Some(row) = stack.child_mut::<HStack>(1) {
-      if let Some(code) = row.child_mut::<BasicText>(0) {
-        code.set_width(Some(code_w));
-        code.set_theme(mode);
-        code.set_focused(focused);
-      }
-      if let Some(mini) = row.child_mut::<BasicText>(1) {
-        mini.set_theme(mode);
-        mini.set_focused(focused);
-      }
+    if let Some(code) = stack.child_mut::<BasicText>(1) {
+      code.set_width(Some(code_w));
+      code.set_theme(mode);
+      code.set_focused(focused);
     }
     if let Some(bar) = stack.child_mut::<HStack>(2) {
       if let Some(left) = bar.child_mut::<BasicText>(0) {
@@ -362,7 +345,7 @@ impl EditorUi {
     }
     // Code width follows the content size (window is fixed, maximize
     // still changes the viewport).
-    self.code_width = (viewport.width - 48.0 - self.sidebar.width_value() - 136.0).max(40.0);
+    self.code_width = (viewport.width - 48.0 - self.sidebar.width_value() - 16.0).max(40.0);
     let code_w = self.code_width;
     for index in 0..5 {
       if let Some(page) = self.sidebar.page_mut(index) {
