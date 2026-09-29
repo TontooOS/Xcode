@@ -68,28 +68,40 @@ fn example_code(file: &str, project: &str, user: &str) -> String {
   )
 }
 
-/// Resolve the bundled `Resources/computer.png` device glyph.
-fn computer_icon_path() -> std::path::PathBuf {
+/// Resolve a bundled `Resources/<file>` raster (device glyphs).
+fn resource_path(file: &str) -> std::path::PathBuf {
   let mut candidates = Vec::new();
   if let Ok(env) = std::env::var("APP_RESOURCES_DIR") {
     if !env.is_empty() {
-      candidates.push(std::path::PathBuf::from(env).join("computer.png"));
+      candidates.push(std::path::PathBuf::from(env).join(file));
     }
   }
   if let Ok(cwd) = std::env::current_dir() {
-    candidates.push(cwd.join("Resources").join("computer.png"));
+    candidates.push(cwd.join("Resources").join(file));
   }
   if let Ok(exe) = std::env::current_exe() {
     if let Some(parent) = exe.parent() {
-      candidates.push(parent.join("Resources").join("computer.png"));
+      candidates.push(parent.join("Resources").join(file));
       if let Some(grand) = parent.parent() {
-        candidates.push(grand.join("Resources").join("computer.png"));
+        candidates.push(grand.join("Resources").join(file));
       }
     }
   }
   candidates.into_iter().find(|p| p.is_file()).unwrap_or_else(|| {
-    std::path::PathBuf::from("__xcode_missing_computer_icon__")
+    std::path::PathBuf::from(format!("__xcode_missing_{file}__"))
   })
+}
+
+/// Resolve the bundled `Resources/computer.png` device glyph.
+fn computer_icon_path() -> std::path::PathBuf {
+  resource_path("computer.png")
+}
+
+/// Absolute path string for a bundled raster, for menu row icons.
+/// Missing files resolve to a sentinel path: the row then draws its
+/// plain label without an icon.
+fn png(file: &str) -> String {
+  resource_path(file).to_string_lossy().to_string()
 }
 
 /// Static editor page: breadcrumb, code plus minimap, status bar.
@@ -191,14 +203,14 @@ impl EditorUi {
         lang::t("menu.device"),
         vec![
           MenuItem::section(lang::t("menu.devices")),
-          MenuItem::action(lang::t("menu.device")),
+          MenuItem::action(lang::t("menu.device")).icon(png("computer.png")),
           MenuItem::divider(),
           MenuItem::section(lang::t("menu.build")),
-          MenuItem::action(lang::t("menu.prod")),
-          MenuItem::action(lang::t("menu.dev")),
+          MenuItem::action(lang::t("menu.prod")).icon(png("wrench.png")),
+          MenuItem::action(lang::t("menu.dev")).icon(png("wrench.png")),
           MenuItem::divider(),
           MenuItem::section(lang::t("menu.utils")),
-          MenuItem::action(lang::t("menu.export")),
+          MenuItem::action(lang::t("menu.export")).icon(png("up.png")),
         ],
       )
       .on_action(|path| println!("device menu {path:?} (example)")),
