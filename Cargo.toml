@@ -11,5 +11,5 @@ path = "src/main.rs"
 
 [dependencies]
 # TontooOS SDK: frameworks via features (on-device: /Library/System/sdk).
-sdk = { path = "/Library/System/sdk", features = ["TontooUI", "CoreIcon", "Foundation", "Accessibility", "ArchiveKit", "CoreData"] }
+sdk = { path = "/Library/System/sdk", features = ["TontooUI", "CoreIcon", "Foundation", "Accessibility", "ArchiveKit", "CoreData", "DocumentKit"] }
 vello = "0.10"

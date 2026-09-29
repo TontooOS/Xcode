@@ -17,10 +17,12 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
+use crate::DocumentKit::{SyntaxLang, highlight_syntax as highlight};
 use crate::TontooUI::elements::{
-  Align, BasicText, BasicToolbar, FileImage, HStack, HorizontalDivider,
-  MenuItem, NestedMenu, SearchField, Sidebar, SidebarItem, Spacer,
-  TextForeground, TextStyle, ToolbarItem, TrafficAction, View, VStack,
+  Align, BasicText, BasicToolbar, FileImage, FormattedText, HStack,
+  HorizontalDivider, MenuItem, NestedMenu, SearchField, Sidebar, SidebarItem,
+  Span, Spacer, TextAlignment, TextForeground, TextStyle, ToolbarItem,
+  TrafficAction, View, VStack,
 };
 use crate::TontooUI::renderer::window::{App, CursorKind, Key, Viewport, WindowCommand, run};
 use crate::TontooUI::renderer::{FontSystem, ImageLoader};
@@ -107,8 +109,84 @@ fn png(file: &str) -> String {
   resource_path(file).to_string_lossy().to_string()
 }
 
-/// Static editor page: breadcrumb, code, status bar.
-fn editor_page(breadcrumb: String, code: String, filter: String, status: String) -> VStack {
+/// Gray gutter width for line numbers.
+const GUTTER_W: f32 = 30.0;
+
+/// One source line: gray number plus DocumentKit-highlighted code.
+/// Both sides share one `TextStyle` size so numbers stay glued to
+/// their lines. Highlighting runs per line (exact for `//` comments
+/// and single-line strings; the example code uses no multi-line
+/// constructs).
+fn code_row(no: usize, spans: Vec<Span>) -> HStack {
+  HStack::new()
+    .spacing(8.0)
+    .align(Align::Center)
+    .child(
+      BasicText::new((no + 1).to_string())
+        .style(TextStyle::Footnote)
+        .foreground(TextForeground::Secondary)
+        .alignment(TextAlignment::Trailing)
+        .width(GUTTER_W),
+    )
+    .child(FormattedText::spans(spans).style(TextStyle::Footnote))
+}
+
+/// Map one source line through the DocumentKit Rust tokenizer into
+/// `Span`s (gaps stay plain code). `dim` is the dimmed theme text.
+fn highlight_spans(line: &str, dim: Color) -> Vec<Span> {
+  if line.is_empty() {
+    return vec![Span::new(" ").code()];
+  }
+  let mut out = Vec::new();
+  let mut cursor = 0;
+  for s in highlight(SyntaxLang::Rust, line) {
+    if s.start > cursor {
+      if let Some(t) = line.get(cursor..s.start) {
+        out.push(Span::new(t).code());
+      }
+    }
+    if let Some(t) = line.get(s.start..s.end) {
+      let mut span = Span::new(t).code();
+      if s.bold {
+        span = span.bold();
+      }
+      if s.italic {
+        span = span.italic();
+      }
+      if s.underline {
+        span = span.underline();
+      }
+      if s.dim {
+        span = span.color(dim);
+      }
+      out.push(span);
+    }
+    cursor = cursor.max(s.end);
+  }
+  if let Some(t) = line.get(cursor..) {
+    if !t.is_empty() {
+      out.push(Span::new(t).code());
+    }
+  }
+  if out.is_empty() {
+    out.push(Span::new(" ").code());
+  }
+  out
+}
+
+/// Dimmed theme text for comments.
+fn dim_text(text: Color) -> Color {
+  let c = text.to_rgba8();
+  Color::from_rgba8(c.r, c.g, c.b, (c.a as f32 * 0.6).round() as u8)
+}
+
+/// Static editor page: breadcrumb, highlighted code with gray line
+/// numbers, status bar.
+fn editor_page(breadcrumb: String, lines: &[String], dim: Color, filter: String, status: String) -> VStack {
+  let mut rows = VStack::new().spacing(2.0).align(Align::Leading);
+  for (no, line) in lines.iter().enumerate() {
+    rows = rows.child(code_row(no, highlight_spans(line, dim)));
+  }
   VStack::new()
     .spacing(8.0)
     .align(Align::Leading)
@@ -117,7 +195,7 @@ fn editor_page(breadcrumb: String, code: String, filter: String, status: String)
         .style(TextStyle::Caption)
         .foreground(TextForeground::Secondary),
     )
-    .child(BasicText::new(code).style(TextStyle::Footnote))
+    .child(rows)
     .child(
       HStack::new()
         .spacing(8.0)
@@ -160,7 +238,10 @@ pub struct EditorUi {
   menu_glass: BasicToolbar,
   /// Dead back/forward chevrons at the content left.
   chev: BasicToolbar,
-  code_width: f32,
+  /// Source lines behind the row views (rebuilt on theme change).
+  code_lines: Vec<String>,
+  /// Text color the row spans were built with.
+  code_text: Color,
   watcher: ThemeWatcher,
   focused: bool,
   bg: Color,
@@ -203,12 +284,16 @@ impl EditorUi {
       lang::t("menu.utils"),
       lang::t("menu.export"),
     ];
+    let code_lines: Vec<String> = code.lines().map(|l| l.to_string()).collect();
+    // Initial spans use a neutral dim; the first draw rebuilds them
+    // in the live theme text color (see `wire_page`).
+    let dim = dim_text(Color::from_rgb8(0xd8, 0xd9, 0xd9));
     let mut sidebar = Sidebar::new(items)
-      .page(editor_page(breadcrumb.clone(), code.clone(), filter.clone(), status.clone()))
-      .page(editor_page(breadcrumb.clone(), code.clone(), filter.clone(), status.clone()))
-      .page(editor_page(breadcrumb.clone(), code.clone(), filter.clone(), status.clone()))
-      .page(editor_page(breadcrumb.clone(), code.clone(), filter.clone(), status.clone()))
-      .page(editor_page(breadcrumb, code, filter, status))
+      .page(editor_page(breadcrumb.clone(), &code_lines, dim, filter.clone(), status.clone()))
+      .page(editor_page(breadcrumb.clone(), &code_lines, dim, filter.clone(), status.clone()))
+      .page(editor_page(breadcrumb.clone(), &code_lines, dim, filter.clone(), status.clone()))
+      .page(editor_page(breadcrumb.clone(), &code_lines, dim, filter.clone(), status.clone()))
+      .page(editor_page(breadcrumb, &code_lines, dim, filter, status))
       .search_field(false)
       .toggle_button(false)
       .collapsible(false);
@@ -262,7 +347,8 @@ impl EditorUi {
         ToolbarItem::divider(),
         ToolbarItem::icon("chevron.right"),
       ]),
-      code_width: 600.0,
+      code_lines,
+      code_text: Color::TRANSPARENT,
       watcher: ThemeWatcher::new(),
       focused: true,
       bg: crate::TontooUI::renderer::window::BACKGROUND,
@@ -270,9 +356,16 @@ impl EditorUi {
     }
   }
 
-  /// Wire one page: theme for all texts plus the code width for the
-  /// current content size.
-  fn wire_page(page: &mut dyn View, mode: ThemeMode, focused: bool, code_w: f32) {
+  /// Wire one page: theme for all texts; code spans rebuild when the
+  /// theme text color changed (fresh dim for comments).
+  fn wire_page(
+    page: &mut dyn View,
+    mode: ThemeMode,
+    focused: bool,
+    lines: &[String],
+    dim: Color,
+    recolor: bool,
+  ) {
     let Some(stack) = page.as_any_mut().downcast_mut::<VStack>() else {
       return;
     };
@@ -280,10 +373,22 @@ impl EditorUi {
       line.set_theme(mode);
       line.set_focused(focused);
     }
-    if let Some(code) = stack.child_mut::<BasicText>(1) {
-      code.set_width(Some(code_w));
-      code.set_theme(mode);
-      code.set_focused(focused);
+    if let Some(rows) = stack.child_mut::<VStack>(1) {
+      for (no, source) in lines.iter().enumerate() {
+        if let Some(row) = rows.child_mut::<HStack>(no) {
+          if let Some(gutter) = row.child_mut::<BasicText>(0) {
+            gutter.set_theme(mode);
+            gutter.set_focused(focused);
+          }
+          if let Some(code) = row.child_mut::<FormattedText>(1) {
+            if recolor {
+              code.set_source(highlight_spans(source, dim));
+            }
+            code.set_theme(mode);
+            code.set_focused(focused);
+          }
+        }
+      }
     }
     if let Some(bar) = stack.child_mut::<HStack>(2) {
       if let Some(left) = bar.child_mut::<BasicText>(0) {
@@ -344,12 +449,15 @@ impl EditorUi {
       }
     }
     // Code width follows the content size (window is fixed, maximize
-    // still changes the viewport).
-    self.code_width = (viewport.width - 48.0 - self.sidebar.width_value() - 16.0).max(40.0);
-    let code_w = self.code_width;
+    // still changes the viewport). Spans rebuild on theme text change.
+    let dim = dim_text(palette.text);
+    let recolor = palette.text != self.code_text;
+    if recolor {
+      self.code_text = palette.text;
+    }
     for index in 0..5 {
       if let Some(page) = self.sidebar.page_mut(index) {
-        Self::wire_page(page, mode, focused, code_w);
+        Self::wire_page(page, mode, focused, &self.code_lines, dim, recolor);
       }
     }
 
@@ -626,6 +734,34 @@ mod tests {
     assert!(code.contains("testApp"));
     assert!(code.contains("Created by arlo"));
     assert!(code.contains("import SwiftUI"));
+  }
+
+  #[test]
+  fn highlight_spans_cover_everything() {
+    let dim = Color::from_rgba8(128, 128, 128, 153);
+    // Empty lines stay renderable.
+    assert!(!highlight_spans("", dim).is_empty());
+    // Plain text without tokens stays one code span.
+    assert_eq!(highlight_spans("hello", dim).len(), 1);
+    // Gap filling is exact: mapped spans equal tokenizer spans plus
+    // one plain span per uncovered gap, whatever the lexer finds.
+    for line in ["fn x() {} // hi", "let s = \"hi\";", "    ", "}"] {
+      let toks = highlight(SyntaxLang::Rust, line);
+      let mut gaps = 0;
+      let mut cursor = 0;
+      for t in &toks {
+        if t.start > cursor {
+          gaps += 1;
+        }
+        cursor = cursor.max(t.end);
+      }
+      if cursor < line.len() {
+        gaps += 1;
+      }
+      let mapped = highlight_spans(line, dim).len();
+      let expected = toks.len() + gaps;
+      assert_eq!(mapped, expected.max(1), "line {line:?}");
+    }
   }
 
   #[test]
