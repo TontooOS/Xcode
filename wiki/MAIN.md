@@ -58,6 +58,7 @@ See [StartPage.md](StartPage.md) for details.
 - 2026-09-29: Editor feels alive but acts dead (native hover/press/selection/collapse/wheel routing, no callbacks, identical pages).
 - 2026-09-29: Sidebar never collapses (no collapse button, Run pill only) plus a functionless 28px search capsule stretched across its bottom.
 - 2026-09-29: Dead Run/Stop pill pair at the editor content top right (hover/press tint, no callbacks).
+- 2026-09-29: `computer.png` device glyph left of the device menu (centered group).
 - 2026-09-29: Single Run/Stop pair at the sidebar top right edge (left pill removed).
 - 2026-09-29: Sidebar labels follow the theme via `set_item_text(None)` (element defaults to hand-set white, unreadable in light mode).
 - 2026-09-29: Content topbar (centered device `NestedMenu` with Devices/Build/Utilities sections, dead chevron pair, dead far-right collapse pill; all example).

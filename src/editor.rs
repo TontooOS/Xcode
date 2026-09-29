@@ -15,9 +15,9 @@
 //! `open_project_window` waits ~600ms first (old window visibly
 //! closes, short gap), then opens the 1100x700 editor fresh.
 use crate::TontooUI::elements::{
-  Align, BasicText, BasicToolbar, HStack, MenuItem, NestedMenu, SearchField,
-  Sidebar, SidebarItem, Spacer, TextForeground, TextStyle, ToolbarItem,
-  TrafficAction, View, VStack,
+  Align, BasicText, BasicToolbar, FileImage, HStack, MenuItem, NestedMenu,
+  SearchField, Sidebar, SidebarItem, Spacer, TextForeground, TextStyle,
+  ToolbarItem, TrafficAction, View, VStack,
 };
 use crate::TontooUI::renderer::window::{App, CursorKind, Key, Viewport, WindowCommand, run};
 use crate::TontooUI::renderer::{FontSystem, ImageLoader};
@@ -36,6 +36,9 @@ const EDITOR_W: u32 = 1100;
 const EDITOR_H: u32 = 700;
 /// Navigator file row index (preselected once).
 const FILE_INDEX: usize = 4;
+/// Device glyph size next to the menu and its gap.
+const DEVICE_ICON: f32 = 22.0;
+const DEVICE_GAP: f32 = 8.0;
 /// Bottom search height: deliberately small; the width always spans
 /// the full sidebar column.
 const SEARCH_H: f32 = 28.0;
@@ -63,6 +66,30 @@ fn example_code(file: &str, project: &str, user: &str) -> String {
   format!(
     "//  {file}.swift\n//  {project}\n//\n//  Created by {user}.\n//\nimport SwiftUI\n\n@main\nstruct {file}: App {{\n    var body: some Scene {{\n        WindowGroup {{\n            ContentView()\n        }}\n    }}\n}}\n"
   )
+}
+
+/// Resolve the bundled `Resources/computer.png` device glyph.
+fn computer_icon_path() -> std::path::PathBuf {
+  let mut candidates = Vec::new();
+  if let Ok(env) = std::env::var("APP_RESOURCES_DIR") {
+    if !env.is_empty() {
+      candidates.push(std::path::PathBuf::from(env).join("computer.png"));
+    }
+  }
+  if let Ok(cwd) = std::env::current_dir() {
+    candidates.push(cwd.join("Resources").join("computer.png"));
+  }
+  if let Ok(exe) = std::env::current_exe() {
+    if let Some(parent) = exe.parent() {
+      candidates.push(parent.join("Resources").join("computer.png"));
+      if let Some(grand) = parent.parent() {
+        candidates.push(grand.join("Resources").join("computer.png"));
+      }
+    }
+  }
+  candidates.into_iter().find(|p| p.is_file()).unwrap_or_else(|| {
+    std::path::PathBuf::from("__xcode_missing_computer_icon__")
+  })
 }
 
 /// Static editor page: breadcrumb, code plus minimap, status bar.
@@ -111,6 +138,8 @@ pub struct EditorUi {
   /// Dead Run/Stop pair at the sidebar top right edge (hover/press
   /// tint only, no callbacks).
   run_stop: BasicToolbar,
+  /// Device glyph left of the menu (plain `computer.png` raster).
+  computer: FileImage,
   /// Centered device text-menu with sections (example selection only).
   device: NestedMenu,
   /// Dead back/forward chevrons at the top right.
@@ -157,6 +186,7 @@ impl EditorUi {
         ToolbarItem::divider(),
         ToolbarItem::icon("stop.fill"),
       ]),
+      computer: FileImage::new(computer_icon_path(), DEVICE_ICON, DEVICE_ICON).radius(5.0),
       device: NestedMenu::new(
         lang::t("menu.device"),
         vec![
@@ -242,6 +272,8 @@ impl EditorUi {
     self.search.set_focused(focused);
     self.run_stop.set_theme(theme.mode, theme.glass);
     self.run_stop.set_focused(focused);
+    self.computer.set_theme(dark);
+    self.computer.set_focused(focused);
     self.device.set_theme(palette.accent, dark);
     self.device.set_glass(theme.mode, theme.glass);
     self.device.set_focused(focused);
@@ -267,17 +299,22 @@ impl EditorUi {
     let content_x = viewport.x + col_w;
     let content_w = (viewport.width - col_w).max(0.0);
     let right = viewport.x + viewport.width;
-    // Topbar row in the content toolbar zone: centered device
-    // text-menu, dead chevron pair right, dead collapse pill far right.
+    // Topbar row in the content toolbar zone: device glyph plus
+    // centered text-menu, dead chevron pair right, dead collapse pill
+    // far right.
     self.device.set_viewport(viewport.x, viewport.y, viewport.width, viewport.height);
     let (menu_w, menu_h) = self.device.measure(fonts);
-    self.device.place(
+    let group_w = DEVICE_ICON + DEVICE_GAP + menu_w;
+    let group_x = content_x + ((content_w - group_w) / 2.0).max(0.0);
+    self.computer.place(
       fonts,
-      content_x + ((content_w - menu_w) / 2.0).max(0.0),
-      viewport.y + 14.0,
-      menu_w,
-      menu_h,
+      group_x,
+      viewport.y + 14.0 + ((menu_h - DEVICE_ICON) / 2.0).max(0.0),
+      DEVICE_ICON,
+      DEVICE_ICON,
     );
+    self.computer.draw(scene, fonts, images);
+    self.device.place(fonts, group_x + DEVICE_ICON + DEVICE_GAP, viewport.y + 14.0, menu_w, menu_h);
     self.device.draw(scene, fonts, images);
     let (chev_w, _) = self.chev.measure(fonts);
     self.chev.place(fonts, right - SEARCH_PAD - 36.0 - SEARCH_PAD - chev_w, viewport.y + 14.0, chev_w, 36.0);
@@ -529,5 +566,17 @@ mod tests {
     // The starter and the editor child agree on this key instead of
     // CLI arguments.
     assert_eq!(PROJECT_ENV, "XCODE_PROJECT_NAME");
+  }
+
+  #[test]
+  fn computer_glyph_resolves_in_project() {
+    // `cargo test` runs with the package root as cwd, so the bundled
+    // `Resources/computer.png` must resolve (no placeholder fallback).
+    let path = computer_icon_path();
+    assert!(path.is_file(), "missing {}", path.display());
+    assert_eq!(
+      path.file_name().and_then(|s| s.to_str()),
+      Some("computer.png")
+    );
   }
 }
