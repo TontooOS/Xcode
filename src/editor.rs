@@ -143,7 +143,12 @@ impl EditorUi {
       .search_field(false)
       .toggle_button(false)
       .collapsible(false);
+    sidebar.set_title(format!("{project} › {}", lang::t("ed.device")));
     sidebar.select(FILE_INDEX);
+    // The element defaults item labels to hand-set white, which wins
+    // over the theme in light mode: clear the override once so labels
+    // follow `set_theme` (dark `#d8d9d9`, light `#272727`).
+    sidebar.set_item_text(None);
     Self {
       sidebar,
       search: SearchField::new(lang::t("ed.search")),
