@@ -31,9 +31,12 @@ const WINDOW_HEIGHT: u32 = 585;
 
 - There is no `Titlebar`: traffic lights are never constructed, so no
   red/yellow/green lights can appear.
-- The drag region is the top strip minus the close pill
-  (`(52.0, 0.0, 368.0, 44.0)`), so close clicks never start a window
-  drag.
+- The drag region is the whole window (`(0, 0, 420, 585)`), so a press
+  anywhere on the background drags the app. A press inside the drag
+  region starts a system drag instead of a click, therefore no control
+  ever sees `mouse_down`; `mouse_up` synthesizes down+up at the release
+  position instead, so releasing over the close pill or an action button
+  fires it while releasing anywhere else (a real drag) does nothing.
 - The recents box is display-only: rows never handle mouse events. Row
   text is scaled down with the box (`Caption` 12px names, `Caption2`
   11px paths, 30px symbols in 48px rows).

@@ -39,3 +39,4 @@ See [StartPage.md](StartPage.md) for details.
 
 - 2026-09-29: Initial Xcode start page (X close toolbar button, centered `icon.tico` in normal variant, `Open...` / `Clone...` / `New Project` example buttons, static recents box, `lang/en_us.json` and `lang/de_de.json`).
 - 2026-09-29: Scaled the whole window ~25% down to 420x585 (90px icon, 330x255 recents box, smaller row text).
+- 2026-09-29: Full-window background drag (press anywhere drags the app, releases over controls still click).

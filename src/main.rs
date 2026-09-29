@@ -335,9 +335,10 @@ impl App for StartPage {
   }
 
   fn drag_region(&self) -> Option<(f32, f32, f32, f32)> {
-    // Top strip drags the window; the close pill area is excluded so
-    // its clicks never start a window drag.
-    Some((52.0, 0.0, 368.0, 44.0))
+    // The whole window background drags the app: a press anywhere
+    // starts a system drag instead of a click (see `mouse_up`, which
+    // re-fires releases over controls so buttons keep working).
+    Some((0.0, 0.0, WINDOW_WIDTH as f32, WINDOW_HEIGHT as f32))
   }
 
   fn poll_window_command(&mut self) -> Option<WindowCommand> {
@@ -347,14 +348,23 @@ impl App for StartPage {
     None
   }
 
-  fn mouse_down(&mut self, x: f64, y: f64) {
-    self.close_bar.mouse_down(x, y);
-    self.each_action_button(|button| button.mouse_down(x, y));
+  fn mouse_down(&mut self, _x: f64, _y: f64) {
+    // Unreachable for the left button: the drag region covers the whole
+    // window, so every press starts a system drag and never reaches the
+    // controls. Clicks are synthesized in `mouse_up` instead.
   }
 
   fn mouse_up(&mut self, x: f64, y: f64) {
+    // No control ever sees `mouse_down` (see `drag_region` / `mouse_down`),
+    // so synthesize down+up at the release position: releasing over the
+    // close pill or an action button fires it, releasing anywhere else
+    // (a real background drag) does nothing.
+    self.close_bar.mouse_down(x, y);
     self.close_bar.mouse_up(x, y);
-    self.each_action_button(|button| button.mouse_up(x, y));
+    self.each_action_button(|button| {
+      button.mouse_down(x, y);
+      button.mouse_up(x, y);
+    });
   }
 
   fn mouse_move(&mut self, x: f64, y: f64) {
