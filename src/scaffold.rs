@@ -69,6 +69,35 @@ pub fn documents_dir() -> PathBuf {
   std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
+/// OS username (`USER`, then `USERNAME`, then `user`).
+pub fn system_username() -> String {
+  for key in ["USER", "USERNAME"] {
+    if let Ok(value) = std::env::var(key) {
+      let trimmed = value.trim().to_string();
+      if !trimmed.is_empty() {
+        return trimmed;
+      }
+    }
+  }
+  "user".to_string()
+}
+
+/// Default bundle ID organization: `dev.<username>`, sanitized to
+/// lowercase reverse-DNS (`dev.user` when nothing usable remains).
+pub fn default_bundle_id() -> String {
+  let clean: String = system_username()
+    .to_lowercase()
+    .chars()
+    .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+    .collect();
+  let clean = clean.trim_matches(|c| c == '-' || c == '_');
+  if clean.is_empty() {
+    "dev.user".to_string()
+  } else {
+    format!("dev.{clean}")
+  }
+}
+
 fn cargo_toml(cargo_name: &str, version: &str) -> String {
   format!(
     "[package]\nname = \"{cargo_name}\"\nversion = \"{version}\"\nedition = \"2021\"\n\n\n\n[[bin]]\nname = \"{cargo_name}\"\npath = \"src/app.rs\"\n\n[dependencies]\n# TontooOS SDK: frameworks via features (on-device: /Library/System/sdk).\nsdk = {{ path = \"/Library/System/sdk\", features = [\"TontooUI\", \"Foundation\", \"Accessibility\", \"CoreData\"] }}\nvello = \"0.10\"\n"
@@ -186,6 +215,36 @@ mod tests {
     assert_eq!(normalize_version("27.0.0"), Some("27.0.0".to_string()));
     assert_eq!(normalize_version("x"), None);
     assert_eq!(normalize_version("1.0.0.0"), None);
+  }
+
+  #[test]
+  fn default_bundle_id_uses_username() {
+    // Process-global env: set and restore inside this single test.
+    let prev_user = std::env::var("USER").ok();
+    let prev_name = std::env::var("USERNAME").ok();
+    std::env::set_var("USER", "Arlo Test");
+    std::env::remove_var("USERNAME");
+    assert_eq!(default_bundle_id(), "dev.arlotest");
+    std::env::set_var("USER", "!!!---");
+    assert_eq!(default_bundle_id(), "dev.user");
+    match (prev_user, prev_name) {
+      (Some(u), Some(n)) => {
+        std::env::set_var("USER", u);
+        std::env::set_var("USERNAME", n);
+      }
+      (Some(u), None) => {
+        std::env::set_var("USER", u);
+        std::env::remove_var("USERNAME");
+      }
+      (None, Some(n)) => {
+        std::env::remove_var("USER");
+        std::env::set_var("USERNAME", n);
+      }
+      (None, None) => {
+        std::env::remove_var("USER");
+        std::env::remove_var("USERNAME");
+      }
+    }
   }
 
   #[test]

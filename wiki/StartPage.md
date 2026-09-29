@@ -79,8 +79,8 @@ pub fn update(&mut self, accent: Color, dark: bool, mode: ThemeMode, focused: bo
 | `locale` | `SegmentedPicker` | `EN` / `DE` switch next to the `sheet.app_name` label; selects whether the English or the German name field shows |
 | `name` | `BasicTextField` | English or German app name (placeholder `sheet.ph_name`); only the visible one takes typing |
 | `version` | `BasicTextField` | `sheet.app_version` label plus version field (placeholder `sheet.ph_version`) |
-| `org` | `BasicTextField` | `sheet.bundle_id` label plus organization field, prefilled with `de.arlomu` |
-| `preview` | `BasicText` | Live `{org}.{english_name}` line (`Caption`, `Secondary`); shows `AppName` while the English name is empty and `de.arlomu` while the org is empty; English only |
+| `org` | `BasicTextField` | `sheet.bundle_id` label plus organization field, prefilled with `dev.<username>` (`scaffold::default_bundle_id`) |
+| `preview` | `BasicText` | Live `{org}.{english_name}` line (`Caption`, `Secondary`); shows `AppName` while the English name is empty and the `dev.<username>` default while the org is empty; English only |
 | `error` | `BasicText` | Red `Caption` hint (`sheet.err_*`) after failed validation; empty otherwise |
 | `buttons` | `HStack` | `Cancel` left, `Create` right (capsule `Button` elements) |
 | `chooser` | step 2 | `location.title`, current path line, `..` plus up to 8 subdirectory buttons (`Plain` + `folder.fill`), `location.new_folder` target preview, `Cancel` / `Create` row |

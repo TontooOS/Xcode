@@ -24,7 +24,7 @@ pub fn save_project(record: &ProjectRecord) -> Result<(), String>
 | `name_en` | `String` | English app name (required, also the folder name) |
 | `name_de` | `String` | German app name (optional, falls back to English) |
 | `version` | `String` | Project version (required) |
-| `bundle_id` | `String` | Organization identifier, e.g. `de.arlomu` (required) |
+| `bundle_id` | `String` | Organization identifier, defaults to `dev.<username>` (required) |
 | `path` | `String` | Scaffolded project root on disk |
 
 ### Rules
@@ -87,6 +87,10 @@ pub fn create_project(
   looks its strings up (same layout as AboutThisApp).
 - `documents_dir()` resolves `$HOME/Documents` (current directory
   fallback) as the folder chooser root.
+- `default_bundle_id()` builds `dev.<username>` from `USER` (then
+  `USERNAME`, then `user`), lowercased to reverse-DNS
+  (`dev.user` fallback); used as the org prefill and the preview
+  fallback.
 
 ## Folder chooser flow
 

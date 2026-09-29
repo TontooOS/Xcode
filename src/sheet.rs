@@ -3,8 +3,8 @@
 //! A `BasicSheet` card with two steps. Step 1 is the 380x292 options
 //! form: title, an EN/DE `SegmentedPicker` switching between the
 //! English and the German app name field, an app version field, a
-//! bundle ID (organization) field prefilled with `de.arlomu`, a live
-//! bundle identifier preview (`{org}.{english_name}`, `AppName` while
+//! bundle ID (organization) field prefilled with `dev.<username>`, a
+//! live bundle identifier preview (`{org}.{english_name}`, `AppName` while
 //! empty; English only), an error line and a `Cancel` / `Create`
 //! button row. `Create` validates (EN name, version and bundle ID are
 //! required) and moves to step 2. Step 2 is a folder chooser rooted at
@@ -26,7 +26,7 @@ use crate::TontooUI::renderer::{FontSystem, ImageLoader};
 use crate::TontooUI::theme::ThemeMode;
 use crate::lang;
 use crate::projects::{ProjectRecord, save_project};
-use crate::scaffold::{create_project, documents_dir, validate};
+use crate::scaffold::{create_project, default_bundle_id, documents_dir, validate};
 use vello::Scene;
 use vello::peniko::Color;
 
@@ -70,6 +70,7 @@ pub struct NewProjectForm {
   version: BasicTextField,
   org_label: BasicText,
   org: BasicTextField,
+  org_default: String,
   preview: BasicText,
   error: BasicText,
   cancel: Button,
@@ -101,8 +102,10 @@ impl NewProjectForm {
     let create_pressed = create_flag.clone();
     let nav_flag: Rc<Cell<Option<Nav>>> = Rc::new(Cell::new(None));
     let up_nav = nav_flag.clone();
-    let mut org = BasicTextField::new("de.arlomu");
-    org.set_text("de.arlomu");
+    let org_default = default_bundle_id();
+    let org_preview = format!("{org_default}.AppName");
+    let mut org = BasicTextField::new(org_default.clone());
+    org.set_text(org_default.clone());
     Self {
       step: Step::Form,
       title: BasicText::new(lang::t("sheet.title")).style(TextStyle::Body),
@@ -114,7 +117,8 @@ impl NewProjectForm {
       version: BasicTextField::new(lang::t("sheet.ph_version")),
       org_label: BasicText::new(lang::t("sheet.bundle_id")).style(TextStyle::Callout),
       org,
-      preview: BasicText::new("de.arlomu.AppName")
+      org_default,
+      preview: BasicText::new(org_preview)
         .style(TextStyle::Caption)
         .foreground(TextForeground::Secondary),
       error: BasicText::new("").style(TextStyle::Caption).foreground_color(ERROR_RED),
@@ -287,7 +291,11 @@ impl NewProjectForm {
 
     // Bundle identifier preview (English only).
     let org = self.org.text_value().trim().to_string();
-    let org_show = if org.is_empty() { "de.arlomu".to_string() } else { org };
+    let org_show = if org.is_empty() {
+      self.org_default.clone()
+    } else {
+      org
+    };
     let name = self.name_en.text_value().trim().to_string();
     let name_show = if name.is_empty() { "AppName".to_string() } else { name };
     self.preview.set_text(format!("{org_show}.{name_show}"));
