@@ -49,3 +49,4 @@ See [StartPage.md](StartPage.md) for details.
 - 2026-09-29: Empty recents box by default plus modal new-project sheet (EN/DE name switch, version, bundle ID, live `{org}.{english_name}` preview, `Cancel` closes, `Create` is an example).
 - 2026-09-29: Real project creation (folder chooser from `~/Documents`, scaffold with `Cargo.toml`/`tontoo.proj`/`.gitignore`/`src`/`Resources`/`lang`, CoreData `Project` records, `No Projects` placeholder, first row selected).
 - 2026-09-29: Scaffold generates lowercase `src/content_view.rs` (Linux module resolution) with trimmed template imports, `Resources/lang/` runtime mirror next to build-input `lang/`, Xcode version line shows `27.0.0`.
+- 2026-09-29: Background-only drag (hover-tracked hit test over close pill and buttons, real down/up clicks, no more release synthesis).

@@ -44,13 +44,11 @@ const WINDOW_HEIGHT: u32 = 585;
   [Projects.md](Projects.md)), first row accent-selected, no click
   handling and no open action yet. While empty it shows the centered
   dim `project.empty` line.
-- The drag region is the whole window (`(0, 0, 420, 585)`) while no
-  sheet is up, so a press anywhere on the background drags the app. A
-  press inside the drag region starts a system drag instead of a click,
-  therefore no control ever sees `mouse_down`; `mouse_up` synthesizes
-  down+up at the release position instead, so releasing over the close
-  pill or an action button fires it while releasing anywhere else (a
-  real drag) does nothing.
+- The drag region is background-only: the renderer polls it on every
+  press, and the hover-tracked cursor decides. Over the close pill or
+  an action button (placed rects from the last frame) it returns `None`
+  so the press reaches the app as a real down/up click; anywhere else
+  it returns the full window and the press starts a system drag.
 - An open sheet disables the drag region (`None`): every press reaches
   the form fields, and dragging pauses until `Cancel` or ESC.
 - Action buttons use `set_palette` (`BUTTON_BG_DARK`/`WHITE` in dark
