@@ -60,6 +60,7 @@ See [StartPage.md](StartPage.md) for details.
 - 2026-09-29: Dead Run/Stop pill pair at the editor content top right (hover/press tint, no callbacks).
 - 2026-09-29: `computer.png` device glyph left of the device menu (centered group).
 - 2026-09-29: Device menu rows carry PNG icons (`MenuItem::icon`, new TontooUI API via CoreImage; `wrench.png` still missing, falls back to plain label).
+- 2026-09-29: Device menu button is transparent over a longer empty glass pill (`NestedMenu::transparent_button`).
 - 2026-09-29: Single Run/Stop pair at the sidebar top right edge (left pill removed).
 - 2026-09-29: Sidebar labels follow the theme via `set_item_text(None)` (element defaults to hand-set white, unreadable in light mode).
 - 2026-09-29: Content topbar (centered device `NestedMenu` with Devices/Build/Utilities sections, dead chevron pair, dead far-right collapse pill; all example).

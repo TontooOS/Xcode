@@ -150,10 +150,13 @@ pub struct EditorUi {
   /// Dead Run/Stop pair at the sidebar top right edge (hover/press
   /// tint only, no callbacks).
   run_stop: BasicToolbar,
+  /// Centered device text-menu with sections (example selection only).
+  /// Transparent body over a longer empty glass pill below.
+  device: NestedMenu,
   /// Device glyph left of the menu (plain `computer.png` raster).
   computer: FileImage,
-  /// Centered device text-menu with sections (example selection only).
-  device: NestedMenu,
+  /// Glass pill behind the device menu (the actual toolbar look).
+  menu_glass: BasicToolbar,
   /// Dead back/forward chevrons at the top right.
   chev: BasicToolbar,
   /// Dead collapse button at the very top right.
@@ -213,7 +216,9 @@ impl EditorUi {
           MenuItem::action(lang::t("menu.export")).icon(png("up.png")),
         ],
       )
-      .on_action(|path| println!("device menu {path:?} (example)")),
+      .on_action(|path| println!("device menu {path:?} (example)"))
+      .transparent_button(true),
+      menu_glass: BasicToolbar::new(),
       chev: BasicToolbar::from_items(vec![
         ToolbarItem::icon("chevron.left"),
         ToolbarItem::divider(),
@@ -289,6 +294,8 @@ impl EditorUi {
     self.device.set_theme(palette.accent, dark);
     self.device.set_glass(theme.mode, theme.glass);
     self.device.set_focused(focused);
+    self.menu_glass.set_theme(theme.mode, theme.glass);
+    self.menu_glass.set_focused(focused);
     self.chev.set_theme(theme.mode, theme.glass);
     self.chev.set_focused(focused);
     self.collapse_btn.set_theme(theme.mode, theme.glass);
@@ -312,8 +319,8 @@ impl EditorUi {
     let content_w = (viewport.width - col_w).max(0.0);
     let right = viewport.x + viewport.width;
     // Topbar row in the content toolbar zone: device glyph plus
-    // centered text-menu, dead chevron pair right, dead collapse pill
-    // far right.
+    // centered text-menu on a longer empty glass pill, dead chevron
+    // pair right, dead collapse pill far right.
     self.device.set_viewport(viewport.x, viewport.y, viewport.width, viewport.height);
     let (menu_w, menu_h) = self.device.measure(fonts);
     let group_w = DEVICE_ICON + DEVICE_GAP + menu_w;
@@ -326,6 +333,12 @@ impl EditorUi {
       DEVICE_ICON,
     );
     self.computer.draw(scene, fonts, images);
+    // Glass body behind the transparent menu button (16px longer on
+    // each side, 36px tall like the other pills).
+    let glass_h = 36.0;
+    let glass_y = viewport.y + 14.0 + ((menu_h - glass_h) / 2.0).max(0.0);
+    self.menu_glass.place(fonts, group_x - 16.0, glass_y, group_w + 32.0, glass_h);
+    self.menu_glass.draw(scene, fonts, images);
     self.device.place(fonts, group_x + DEVICE_ICON + DEVICE_GAP, viewport.y + 14.0, menu_w, menu_h);
     self.device.draw(scene, fonts, images);
     let (chev_w, _) = self.chev.measure(fonts);
@@ -442,6 +455,7 @@ impl EditorUi {
     self.search.set_focused(focused);
     self.run_stop.set_focused(focused);
     self.device.set_focused(focused);
+    self.menu_glass.set_focused(focused);
     self.chev.set_focused(focused);
     self.collapse_btn.set_focused(focused);
   }
