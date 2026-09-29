@@ -65,5 +65,6 @@ See [StartPage.md](StartPage.md) for details.
 - 2026-09-29: Device menu text at 15px (`NestedMenu::button_font`) plus a divider between topbar pills and editor.
 - 2026-09-29: Single Run/Stop pair at the sidebar top right edge (left pill removed).
 - 2026-09-29: Sidebar labels follow the theme via `set_item_text(None)` (element defaults to hand-set white, unreadable in light mode).
-- 2026-09-29: Content topbar (centered device `NestedMenu` with Devices/Build/Utilities sections, dead chevron pair, dead far-right collapse pill; all example).
+- 2026-09-29: Content topbar (device `NestedMenu` with Devices/Build/Utilities sections, dead chevron pair left; all example).
+- 2026-09-29: Collapse button removed; device group centered on the window; picked menu row reflects on top (label plus icon, display only).
 - 2026-09-29: Sheet `Cancel`/`Create` buttons use `SHEET_BUTTON_BG_DARK` in dark mode (`BUTTON_BG_DARK` melts into the sheet card, only the label showed).

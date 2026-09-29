@@ -14,6 +14,9 @@
 //! spawned copy of this binary and closes its own window at once;
 //! `open_project_window` waits ~600ms first (old window visibly
 //! closes, short gap), then opens the 1100x700 editor fresh.
+use std::cell::Cell;
+use std::rc::Rc;
+
 use crate::TontooUI::elements::{
   Align, BasicText, BasicToolbar, FileImage, HStack, HorizontalDivider,
   MenuItem, NestedMenu, SearchField, Sidebar, SidebarItem, Spacer,
@@ -153,16 +156,21 @@ pub struct EditorUi {
   /// tint only, no callbacks).
   run_stop: BasicToolbar,
   /// Centered device text-menu with sections (example selection only).
-  /// Transparent body over a longer empty glass pill below.
+  /// Transparent body over a longer empty glass pill below. Reflects
+  /// the last picked row (label plus icon, display only).
   device: NestedMenu,
+  /// Row icons parallel to the menu items (`None` for headers).
+  device_icons: Vec<Option<String>>,
+  /// Row labels parallel to the menu items (for the top reflection).
+  device_labels: Vec<String>,
+  /// Picked row index, applied to button label and glyph in `update`.
+  device_sel: Rc<Cell<Option<usize>>>,
   /// Device glyph left of the menu (plain `computer.png` raster).
   computer: FileImage,
   /// Glass pill behind the device menu (the actual toolbar look).
   menu_glass: BasicToolbar,
-  /// Dead back/forward chevrons at the top right.
+  /// Dead back/forward chevrons at the content left.
   chev: BasicToolbar,
-  /// Dead collapse button at the very top right.
-  collapse_btn: BasicToolbar,
   code_width: f32,
   watcher: ThemeWatcher,
   focused: bool,
@@ -179,6 +187,32 @@ impl EditorUi {
       SidebarItem::new("ContentView", "doc.fill"),
       SidebarItem::new("Info", "doc.fill"),
       SidebarItem::new(file, "doc.fill"),
+    ];
+    // Row icons parallel to the menu items below (`None` for headers
+    // and dividers): the picked row shows here on top, display only.
+    let device_icons = vec![
+      None,
+      Some(png("computer.png")),
+      None,
+      None,
+      Some(png("wrench.png")),
+      Some(png("wrench.png")),
+      None,
+      None,
+      Some(png("up.png")),
+    ];
+    let device_sel = Rc::new(Cell::new(None));
+    let picked = device_sel.clone();
+    let device_labels = vec![
+      lang::t("menu.devices"),
+      lang::t("menu.device"),
+      String::new(),
+      lang::t("menu.build"),
+      lang::t("menu.prod"),
+      lang::t("menu.dev"),
+      String::new(),
+      lang::t("menu.utils"),
+      lang::t("menu.export"),
     ];
     let mut sidebar = Sidebar::new(items)
       .page(editor_page(breadcrumb.clone(), code.clone(), filter.clone(), status.clone()))
@@ -222,16 +256,23 @@ impl EditorUi {
           MenuItem::action(lang::t("menu.export")).icon(png("up.png")),
         ],
       )
-      .on_action(|path| println!("device menu {path:?} (example)"))
+      .on_action(move |path| {
+        println!("device menu {path:?} (example)");
+        if let Some(&index) = path.first() {
+          picked.set(Some(index));
+        }
+      })
       .transparent_button(true)
       .button_font(15.0),
+      device_icons,
+      device_labels,
+      device_sel,
       menu_glass: BasicToolbar::new(),
       chev: BasicToolbar::from_items(vec![
         ToolbarItem::icon("chevron.left"),
         ToolbarItem::divider(),
         ToolbarItem::icon("chevron.right"),
       ]),
-      collapse_btn: BasicToolbar::from_icons(vec!["sidebar.right".to_string()]).round(true),
       code_width: 600.0,
       watcher: ThemeWatcher::new(),
       focused: true,
@@ -307,8 +348,18 @@ impl EditorUi {
     self.menu_glass.set_focused(focused);
     self.chev.set_theme(theme.mode, theme.glass);
     self.chev.set_focused(focused);
-    self.collapse_btn.set_theme(theme.mode, theme.glass);
-    self.collapse_btn.set_focused(focused);
+    // Picked menu row reflects on top (label plus glyph, display
+    // only, no function).
+    if let Some(index) = self.device_sel.take() {
+      if let Some(label) = self.device_labels.get(index) {
+        if !label.is_empty() {
+          self.device.set_button(label.clone());
+        }
+      }
+      if let Some(icon) = self.device_icons.get(index).and_then(|o| o.clone()) {
+        self.computer.set_path(icon);
+      }
+    }
     // Code width follows the content size (window is fixed, maximize
     // still changes the viewport).
     self.code_width = (viewport.width - 48.0 - self.sidebar.width_value() - 136.0).max(40.0);
@@ -326,14 +377,13 @@ impl EditorUi {
     let col_w = self.sidebar.width_value();
     let content_x = viewport.x + col_w;
     let content_w = (viewport.width - col_w).max(0.0);
-    let right = viewport.x + viewport.width;
     // Topbar row in the content toolbar zone: device glyph plus
-    // centered text-menu on a longer empty glass pill, dead chevron
-    // pair right, dead collapse pill far right.
+    // text-menu centered on the window, dead chevron pair at the
+    // content left.
     self.device.set_viewport(viewport.x, viewport.y, viewport.width, viewport.height);
     let (menu_w, menu_h) = self.device.measure(fonts);
     let group_w = DEVICE_ICON + DEVICE_GAP + menu_w;
-    let group_x = content_x + ((content_w - group_w) / 2.0).max(0.0);
+    let group_x = viewport.x + ((viewport.width - group_w) / 2.0).max(0.0);
     self.computer.place(
       fonts,
       group_x,
@@ -353,8 +403,6 @@ impl EditorUi {
     let (chev_w, _) = self.chev.measure(fonts);
     self.chev.place(fonts, content_x + SEARCH_PAD, viewport.y + 14.0, chev_w, 36.0);
     self.chev.draw(scene, fonts, images);
-    self.collapse_btn.place(fonts, right - SEARCH_PAD - 36.0, viewport.y + 14.0, 36.0, 36.0);
-    self.collapse_btn.draw(scene, fonts, images);
     // Divider between the topbar pills above and the editor below.
     self.top_div.place(fonts, content_x + SEARCH_PAD, viewport.y + 54.0, content_w - SEARCH_PAD * 2.0, 1.0);
     self.top_div.draw(scene, fonts, images);
@@ -416,7 +464,6 @@ impl EditorUi {
     self.run_stop.mouse_move(x, y);
     self.device.mouse_move(x as f64, y as f64);
     self.chev.mouse_move(x, y);
-    self.collapse_btn.mouse_move(x, y);
   }
 
   pub fn mouse_down(&mut self, x: f64, y: f64) {
@@ -428,7 +475,6 @@ impl EditorUi {
     self.run_stop.mouse_down(x, y);
     self.device.mouse_down(x, y);
     self.chev.mouse_down(x, y);
-    self.collapse_btn.mouse_down(x, y);
   }
 
   pub fn mouse_up(&mut self, x: f64, y: f64) {
@@ -438,7 +484,6 @@ impl EditorUi {
     self.run_stop.mouse_up(x, y);
     self.device.mouse_up(x, y);
     self.chev.mouse_up(x, y);
-    self.collapse_btn.mouse_up(x, y);
   }
 
   pub fn mouse_wheel(&mut self, dx: f64, dy: f64) {
@@ -470,7 +515,6 @@ impl EditorUi {
     self.device.set_focused(focused);
     self.menu_glass.set_focused(focused);
     self.chev.set_focused(focused);
-    self.collapse_btn.set_focused(focused);
   }
 }
 
