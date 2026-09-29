@@ -1,13 +1,15 @@
 //! Xcode start page for TontooOS.
 //!
-//! Example start window (560x780) built with TontooUI on Vello/WGPU:
+//! Example start window (420x585, ~25% smaller than the Apple reference)
+//! built with TontooUI on Vello/WGPU:
 //! no traffic lights, only one round toolbar button with an `xmark`
 //! glyph at the top left (closes the window), the centered app icon
 //! from `Resources/icon.tico` rendered through CoreIcon in its normal
 //! (light) variant, the `Xcode` title with a `Version 27.0` line,
 //! three example capsule buttons (`Open...`, `Clone...`, `New Project`)
-//! and a static recents box mirroring the reference screenshot
-//! (SwiftIU, Tux, Tux.zip, C Maps with the first row selected).
+//! and a static scaled-down recents box mirroring the reference
+//! screenshot (SwiftIU, Tux, Tux.zip, C Maps with the first row
+//! selected).
 //!
 //! All text uses SF Pro (system font) with `en_us` and `de_de` strings
 //! from `lang/` via Accessibility. The theme follows the settings
@@ -34,33 +36,34 @@ use TontooUI::theme::{ThemeMode, ThemeWatcher};
 use vello::Scene;
 use vello::peniko::Color;
 
-const WINDOW_WIDTH: u32 = 560;
-const WINDOW_HEIGHT: u32 = 780;
-const ICON_PX: f32 = 120.0;
-const ICON_RADIUS: f32 = 28.0;
-const CONTENT_WIDTH: f32 = 440.0;
-const TEXT_WIDTH: f32 = 440.0;
-const ROW_H: f32 = 64.0;
+const WINDOW_WIDTH: u32 = 420;
+const WINDOW_HEIGHT: u32 = 585;
+const ICON_PX: f32 = 90.0;
+const ICON_RADIUS: f32 = 21.0;
+const CONTENT_WIDTH: f32 = 330.0;
+const TEXT_WIDTH: f32 = 330.0;
+const ROW_H: f32 = 48.0;
 const DIV_H: f32 = 1.0;
-const BOX_PAD: f32 = 8.0;
-const ROW_PAD_X: f32 = 12.0;
-const ROW_ICON: f32 = 40.0;
-const RECENTS_BOX_H: f32 = 340.0;
+const BOX_PAD: f32 = 6.0;
+const ROW_PAD_X: f32 = 9.0;
+const ROW_ICON: f32 = 30.0;
+const RECENTS_BOX_H: f32 = 255.0;
 const VERSION: &str = "27.0";
 
-/// One static recent row: icon plus name/path text column.
+/// One static recent row: icon plus name/path text column (scaled-down
+/// text so the whole list reads 25% smaller: Caption name, Caption2 path).
 fn recent_row(symbol: &str, name: String, path: String) -> HStack {
   let texts = VStack::new()
-    .spacing(2.0)
+    .spacing(1.5)
     .align(Align::Leading)
-    .child(BasicText::new(name).style(TextStyle::Callout))
+    .child(BasicText::new(name).style(TextStyle::Caption))
     .child(
       BasicText::new(path)
-        .style(TextStyle::Caption)
+        .style(TextStyle::Caption2)
         .foreground(TextForeground::Secondary),
     );
   HStack::new()
-    .spacing(12.0)
+    .spacing(9.0)
     .align(Align::Center)
     .child(SFSymbolImage::new(symbol).size(ROW_ICON))
     .child(texts)
@@ -104,7 +107,7 @@ impl StartPage {
     .width(TEXT_WIDTH);
 
     let actions = HStack::new()
-      .spacing(12.0)
+      .spacing(9.0)
       .align(Align::Center)
       .child(
         Button::new(lang::t("action.open"))
@@ -158,9 +161,9 @@ impl StartPage {
       actions,
       rows,
       dividers,
-      box_bg: RoundedRectangle::new(CONTENT_WIDTH, RECENTS_BOX_H, 16.0)
+      box_bg: RoundedRectangle::new(CONTENT_WIDTH, RECENTS_BOX_H, 12.0)
         .fill(BUTTON_BG_DARK),
-      selection_bg: RoundedRectangle::new(CONTENT_WIDTH, ROW_H, 10.0)
+      selection_bg: RoundedRectangle::new(CONTENT_WIDTH, ROW_H, 8.0)
         .fill(Color::from_rgb8(0x00, 0x7a, 0xff)),
       watcher: ThemeWatcher::new(),
       focused: true,
@@ -267,31 +270,31 @@ impl App for StartPage {
 
     // Layout: close button top left, everything else centered below.
     let (vx, vy, vw) = (viewport.x, viewport.y, viewport.width);
-    self.close_bar.place(fonts, vx + 16.0, vy + 16.0, 36.0, 36.0);
+    self.close_bar.place(fonts, vx + 12.0, vy + 12.0, 36.0, 36.0);
     self.close_bar.draw(scene, fonts, images);
 
-    let mut cy = vy + 80.0;
+    let mut cy = vy + 60.0;
     let center = |w: f32| vx + ((vw - w) / 2.0).max(0.0);
 
     let (icon_w, icon_h) = self.icon.measure(fonts);
     self.icon.place(fonts, center(icon_w), cy, icon_w, icon_h);
     self.icon.draw(scene, fonts, images);
-    cy += icon_h + 12.0;
+    cy += icon_h + 9.0;
 
     let (title_w, title_h) = self.title.measure(fonts);
     self.title.place(fonts, center(title_w), cy, title_w, title_h);
     self.title.draw(scene, fonts, images);
-    cy += title_h + 4.0;
+    cy += title_h + 3.0;
 
     let (version_w, version_h) = self.version.measure(fonts);
     self.version.place(fonts, center(version_w), cy, version_w, version_h);
     self.version.draw(scene, fonts, images);
-    cy += version_h + 16.0;
+    cy += version_h + 12.0;
 
     let (actions_w, actions_h) = self.actions.measure(fonts);
     self.actions.place(fonts, center(actions_w), cy, actions_w, actions_h);
     self.actions.draw(scene, fonts, images);
-    cy += actions_h + 18.0;
+    cy += actions_h + 14.0;
 
     // Recents box with the selected first row on accent fill.
     let bx = center(CONTENT_WIDTH);
@@ -334,7 +337,7 @@ impl App for StartPage {
   fn drag_region(&self) -> Option<(f32, f32, f32, f32)> {
     // Top strip drags the window; the close pill area is excluded so
     // its clicks never start a window drag.
-    Some((60.0, 0.0, 500.0, 56.0))
+    Some((52.0, 0.0, 368.0, 44.0))
   }
 
   fn poll_window_command(&mut self) -> Option<WindowCommand> {

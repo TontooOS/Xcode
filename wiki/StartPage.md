@@ -1,39 +1,42 @@
 # StartPage
 
-The start page renders the Xcode welcome window: a fixed 560x780 card
-with no `Titlebar` and no traffic lights. The only chrome at the top is
-a single round `BasicToolbar` pill with one `xmark` icon that closes the
-window. Below it, the app icon from `Resources/icon.tico` shows
-centered at 120px, followed by the bold `Xcode` title, a `Version 27.0`
-line, three example capsule buttons and a static recents box mirroring
-the reference screenshot.
+The start page renders the Xcode welcome window: a fixed 420x585 card
+(~25% smaller than the Apple reference) with no `Titlebar` and no
+traffic lights. The only chrome at the top is a single round
+`BasicToolbar` pill with one `xmark` icon that closes the window. Below
+it, the app icon from `Resources/icon.tico` shows centered at 90px,
+followed by the bold `Xcode` title, a `Version 27.0` line, three example
+capsule buttons and a static scaled-down recents box mirroring the
+reference screenshot.
 
 ## Layout
 
 ```rust
-const WINDOW_WIDTH: u32 = 560;
-const WINDOW_HEIGHT: u32 = 780;
+const WINDOW_WIDTH: u32 = 420;
+const WINDOW_HEIGHT: u32 = 585;
 ```
 
 ### Structure
 
 | Row | Element | Description |
 |---|---|---|
-| `close` | `BasicToolbar` | Round single-`xmark` pill at (16, 16), 36x36; `on_action` requests `WindowCommand::Close` |
-| `icon` | `FileImage` | 120x120, 28px radius, centered; shows the CoreIcon PNG (see `## Icon Pipeline`) |
+| `close` | `BasicToolbar` | Round single-`xmark` pill at (12, 12), 36x36; `on_action` requests `WindowCommand::Close` |
+| `icon` | `FileImage` | 90x90, 21px radius, centered; shows the CoreIcon PNG (see `## Icon Pipeline`) |
 | `title` | `BasicText` | `app.title` in `TextStyle::Headline` (17 semibold), centered |
 | `version` | `BasicText` | `app.version` in `TextStyle::Caption` with `TextForeground::Secondary`, centered |
 | `actions` | `HStack` | Three capsule `Button` elements: `action.open`, `action.clone`, `action.new_project` (with `chevron.down` icon); example `on_press` handlers only print |
-| `recents` | `RoundedRectangle` + rows | 440x340 container (`BUTTON_BG_DARK` / `BUTTON_BG_LIGHT`) with four static rows and three `HorizontalDivider` elements; the first row sits on an accent `RoundedRectangle` selection fill |
+| `recents` | `RoundedRectangle` + rows | 330x255 container (`BUTTON_BG_DARK` / `BUTTON_BG_LIGHT`) with four static 48px rows (30px symbols, `Caption` name + `Caption2` path) and three `HorizontalDivider` elements; the first row sits on an accent `RoundedRectangle` selection fill |
 
 ### Rules
 
 - There is no `Titlebar`: traffic lights are never constructed, so no
   red/yellow/green lights can appear.
 - The drag region is the top strip minus the close pill
-  (`(60.0, 0.0, 500.0, 56.0)`), so close clicks never start a window
+  (`(52.0, 0.0, 368.0, 44.0)`), so close clicks never start a window
   drag.
-- The recents box is display-only: rows never handle mouse events.
+- The recents box is display-only: rows never handle mouse events. Row
+  text is scaled down with the box (`Caption` 12px names, `Caption2`
+  11px paths, 30px symbols in 48px rows).
 - The first row is selected: white name/path text and white symbol on
   the live `palette.accent` fill. Other rows follow the theme text.
 - Action buttons use `set_palette` (`BUTTON_BG_DARK`/`WHITE` in dark

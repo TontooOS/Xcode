@@ -2,10 +2,11 @@
 
 The App To Build, Run, Make Apps (AKA Xcode)
 
-Start page: a 560x780 TontooUI card with an `xmark` close pill (no
-traffic lights), the centered `Resources/icon.tico` (CoreIcon normal
-variant), example `Open...` / `Clone...` / `New Project` buttons and a
-static recents box. Run it with:
+Start page: a 420x585 TontooUI card (~25% smaller than the Apple
+reference) with an `xmark` close pill (no traffic lights), the centered
+90px `Resources/icon.tico` (CoreIcon normal variant), example `Open...`
+/ `Clone...` / `New Project` buttons and a static scaled-down recents
+box. Run it with:
 
 ```bash
 cargo run
