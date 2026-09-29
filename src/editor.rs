@@ -1,11 +1,11 @@
 //! Example project editor window for Xcode (separate big window).
 //!
 //! A static Xcode-like IDE card built on the `Sidebar` element: working
-//! traffic lights (owned by the sidebar), one dead Run pill (no
-//! callback) plus a dead Run/Stop pill pair at the content top right,
-//! a non-collapsible file navigator with one preselected file, a functionless search field stretched across the sidebar
-//! bottom, dead example Swift code plus a dimmed minimap, breadcrumb
-//! and status bar. The element feels alive (hover, press states,
+//! traffic lights (owned by the sidebar), a dead Run/Stop pill pair at
+//! the sidebar top right (no callbacks), a non-collapsible file
+//! navigator with one preselected file, a functionless search capsule
+//! stretched across the sidebar bottom, dead example Swift code plus a
+//! dimmed minimap, breadcrumb and status bar. The element feels alive (hover, press states,
 //! selection, resize) but clicks trigger no actions: there are no
 //! callbacks, all pages are identical and nothing is ever saved, built
 //! or run.
@@ -135,8 +135,7 @@ impl EditorUi {
       .page(editor_page(breadcrumb, code, filter, status))
       .search_field(false)
       .toggle_button(false)
-      .collapsible(false)
-      .left_button(0, "play.fill", || {});
+      .collapsible(false);
     sidebar.set_title(format!("{project} › {}", lang::t("ed.device")));
     sidebar.select(FILE_INDEX);
     Self {
@@ -225,14 +224,14 @@ impl EditorUi {
     // live in it) and fills the whole viewport.
     self.sidebar.place(fonts, viewport.x, viewport.y, viewport.width, viewport.height);
     self.sidebar.draw(scene, fonts, images);
-    // Dead Run/Stop pair at the content top right (36px pill centered
-    // in the 64px content toolbar zone).
     let col_w = self.sidebar.width_value();
+    // Dead Run/Stop pair at the sidebar top right edge, vertically
+    // centered on the traffic lights row like the old pills.
     let (pill_w, _) = self.run_stop.measure(fonts);
     self.run_stop.place(
       fonts,
-      viewport.x + viewport.width - SEARCH_PAD - pill_w,
-      viewport.y + (64.0 - 36.0) / 2.0,
+      viewport.x + col_w - SEARCH_PAD - pill_w,
+      viewport.y + 12.5,
       pill_w,
       36.0,
     );
