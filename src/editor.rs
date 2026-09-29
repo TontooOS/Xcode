@@ -136,8 +136,8 @@ fn code_row(no: usize, spans: Vec<Span>) -> HStack {
 }
 
 /// Map one source line through the DocumentKit Rust tokenizer into
-/// `Span`s (gaps stay plain code). `dim` is the dimmed theme text.
-fn highlight_spans(line: &str, dim: Color) -> Vec<Span> {
+/// `Span`s (gaps stay plain code). Colors follow `SpanKind` per theme.
+fn highlight_spans(line: &str, dark: bool) -> Vec<Span> {
   if line.is_empty() {
     return vec![Span::new(" ").code()];
   }
@@ -150,7 +150,7 @@ fn highlight_spans(line: &str, dim: Color) -> Vec<Span> {
       }
     }
     if let Some(t) = line.get(s.start..s.end) {
-      let mut span = Span::new(t).code();
+      let mut span = Span::new(t).code().color(s.kind.color(dark));
       if s.bold {
         span = span.bold();
       }
@@ -159,9 +159,6 @@ fn highlight_spans(line: &str, dim: Color) -> Vec<Span> {
       }
       if s.underline {
         span = span.underline();
-      }
-      if s.dim {
-        span = span.color(dim);
       }
       out.push(span);
     }
@@ -178,17 +175,11 @@ fn highlight_spans(line: &str, dim: Color) -> Vec<Span> {
   out
 }
 
-/// Dimmed theme text for comments.
-fn dim_text(text: Color) -> Color {
-  let c = text.to_rgba8();
-  Color::from_rgba8(c.r, c.g, c.b, (c.a as f32 * 0.6).round() as u8)
-}
-
 /// Static editor page: highlighted code with gray line numbers.
-fn editor_page(lines: &[String], dim: Color) -> VStack {
+fn editor_page(lines: &[String], dark: bool) -> VStack {
   let mut rows = VStack::new().spacing(2.0).align(Align::Leading);
   for (no, line) in lines.iter().enumerate() {
-    rows = rows.child(code_row(no, highlight_spans(line, dim)));
+    rows = rows.child(code_row(no, highlight_spans(line, dark)));
   }
   rows
 }
@@ -264,15 +255,14 @@ impl EditorUi {
       lang::t("menu.export"),
     ];
     let code_lines: Vec<String> = code.lines().map(|l| l.to_string()).collect();
-    // Initial spans use a neutral dim; the first draw rebuilds them
-    // in the live theme text color (see `wire_page`).
-    let dim = dim_text(Color::from_rgb8(0xd8, 0xd9, 0xd9));
+    // Initial spans assume dark; the first draw rebuilds them in the
+    // live theme (see `wire_page`).
     let mut sidebar = Sidebar::new(items)
-      .page(editor_page(&code_lines, dim))
-      .page(editor_page(&code_lines, dim))
-      .page(editor_page(&code_lines, dim))
-      .page(editor_page(&code_lines, dim))
-      .page(editor_page(&code_lines, dim))
+      .page(editor_page(&code_lines, true))
+      .page(editor_page(&code_lines, true))
+      .page(editor_page(&code_lines, true))
+      .page(editor_page(&code_lines, true))
+      .page(editor_page(&code_lines, true))
       .search_field(false)
       .toggle_button(false)
       .collapsible(false);
@@ -336,13 +326,13 @@ impl EditorUi {
   }
 
   /// Wire one page: theme for all texts; code spans rebuild when the
-  /// theme text color changed (fresh dim for comments).
+  /// theme changed (fresh kind colors).
   fn wire_page(
     page: &mut dyn View,
     mode: ThemeMode,
     focused: bool,
     lines: &[String],
-    dim: Color,
+    dark: bool,
     recolor: bool,
   ) {
     let Some(rows) = page.as_any_mut().downcast_mut::<VStack>() else {
@@ -354,10 +344,10 @@ impl EditorUi {
           gutter.set_theme(mode);
           gutter.set_focused(focused);
         }
-        if let Some(code) = row.child_mut::<FormattedText>(1) {
-          if recolor {
-            code.set_source(highlight_spans(source, dim));
-          }
+          if let Some(code) = row.child_mut::<FormattedText>(1) {
+            if recolor {
+              code.set_source(highlight_spans(source, dark));
+            }
           code.set_theme(mode);
           code.set_focused(focused);
         }
@@ -411,16 +401,14 @@ impl EditorUi {
         self.computer.set_path(icon);
       }
     }
-    // Code width follows the content size (window is fixed, maximize
-    // still changes the viewport). Spans rebuild on theme text change.
-    let dim = dim_text(palette.text);
+    // Spans rebuild on theme text change (fresh kind colors).
     let recolor = palette.text != self.code_text;
     if recolor {
       self.code_text = palette.text;
     }
     for index in 0..5 {
       if let Some(page) = self.sidebar.page_mut(index) {
-        Self::wire_page(page, mode, focused, &self.code_lines, dim, recolor);
+        Self::wire_page(page, mode, focused, &self.code_lines, dark, recolor);
       }
     }
 
@@ -698,11 +686,10 @@ mod tests {
 
   #[test]
   fn highlight_spans_cover_everything() {
-    let dim = Color::from_rgba8(128, 128, 128, 153);
     // Empty lines stay renderable.
-    assert!(!highlight_spans("", dim).is_empty());
+    assert!(!highlight_spans("", true).is_empty());
     // Plain text without tokens stays one code span.
-    assert_eq!(highlight_spans("hello", dim).len(), 1);
+    assert_eq!(highlight_spans("hello", true).len(), 1);
     // Gap filling is exact: mapped spans equal tokenizer spans plus
     // one plain span per uncovered gap, whatever the lexer finds.
     for line in ["fn x() {} // hi", "let s = \"hi\";", "    ", "}"] {
@@ -718,10 +705,21 @@ mod tests {
       if cursor < line.len() {
         gaps += 1;
       }
-      let mapped = highlight_spans(line, dim).len();
+      let mapped = highlight_spans(line, true).len();
       let expected = toks.len() + gaps;
       assert_eq!(mapped, expected.max(1), "line {line:?}");
     }
+  }
+
+  #[test]
+  fn highlight_kinds_resolve_colors() {
+    use crate::DocumentKit::SpanKind;
+    // Every kind has a distinct dark color (keyword pink, string red).
+    let kw = SpanKind::Keyword.color(true);
+    let st = SpanKind::Str.color(true);
+    assert_ne!(kw, st);
+    // Light variants differ from dark ones.
+    assert_ne!(kw, SpanKind::Keyword.color(false));
   }
 
   #[test]
