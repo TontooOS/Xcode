@@ -47,7 +47,7 @@ pages: narrow windows squeeze the code, wide windows use everything.
 | Area | Element | Description |
 |---|---|---|
 | `bar` | `Sidebar` traffic | All three traffic lights working via `press()`; drags via `drag_rect()` |
-| `pills` | `left_button` | Single dead `play.fill` (Run) pill with a no-op callback: press animation plays, nothing happens; content title via `set_title` (`{project} › My Mac`, `ed.device`) |
+| `pills` | `left_button` + `BasicToolbar` | Single dead `play.fill` (Run) pill with a no-op callback plus a dead Run/Stop pair (`play.fill`, divider, `stop.fill`) at the content top right: hover/press tint only, nothing fires; content title via `set_title` (`{project} › My Mac`, `ed.device`) |
 | `navigator` | `SidebarItem` | Project root plus `Assets`, `ContentView`, `Info` and file rows, preselected on the file row; `collapsible(false)` (never collapses, no collapse button), search hidden (`search_field(false)`), toggle pill hidden; mouse reaches the element natively (hover, selection, wheel, resize cursor) |
 | `search` | `SearchField` | Functionless capsule (`ed.search`) pinned to the sidebar bottom: 28px tall, full column width even while resizing; takes focus and typing, never searches |
 | `editor` | page `BasicText` | Static example Swift code (`Footnote`), file stem via `file_stem`, width follows the content size |

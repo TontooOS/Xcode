@@ -2,8 +2,8 @@
 //!
 //! A static Xcode-like IDE card built on the `Sidebar` element: working
 //! traffic lights (owned by the sidebar), one dead Run pill (no
-//! callback), a non-collapsible file navigator with one preselected
-//! file, a functionless search field stretched across the sidebar
+//! callback) plus a dead Run/Stop pill pair at the content top right,
+//! a non-collapsible file navigator with one preselected file, a functionless search field stretched across the sidebar
 //! bottom, dead example Swift code plus a dimmed minimap, breadcrumb
 //! and status bar. The element feels alive (hover, press states,
 //! selection, resize) but clicks trigger no actions: there are no
@@ -14,10 +14,9 @@
 //! spawned copy of this binary and closes its own window at once;
 //! `open_project_window` waits ~600ms first (old window visibly
 //! closes, short gap), then opens the 1100x700 editor fresh.
-
 use crate::TontooUI::elements::{
-  Align, BasicText, HStack, SearchField, Sidebar, SidebarItem, Spacer,
-  TextForeground, TextStyle, TrafficAction, View, VStack,
+  Align, BasicText, BasicToolbar, HStack, SearchField, Sidebar, SidebarItem,
+  Spacer, TextForeground, TextStyle, ToolbarItem, TrafficAction, View, VStack,
 };
 use crate::TontooUI::renderer::window::{App, CursorKind, Key, Viewport, WindowCommand, run};
 use crate::TontooUI::renderer::{FontSystem, ImageLoader};
@@ -108,6 +107,9 @@ fn editor_page(breadcrumb: String, code: String, filter: String, status: String)
 pub struct EditorUi {
   sidebar: Sidebar,
   search: SearchField,
+  /// Dead Run/Stop pair at the content top right (hover/press tint
+  /// only, no callbacks).
+  run_stop: BasicToolbar,
   code_width: f32,
   watcher: ThemeWatcher,
   focused: bool,
@@ -140,6 +142,11 @@ impl EditorUi {
     Self {
       sidebar,
       search: SearchField::new(lang::t("ed.search")),
+      run_stop: BasicToolbar::from_items(vec![
+        ToolbarItem::icon("play.fill"),
+        ToolbarItem::divider(),
+        ToolbarItem::icon("stop.fill"),
+      ]),
       code_width: 600.0,
       watcher: ThemeWatcher::new(),
       focused: true,
@@ -202,6 +209,8 @@ impl EditorUi {
     self.sidebar.set_focused(focused);
     self.search.set_theme(theme.mode, palette.accent, theme.glass);
     self.search.set_focused(focused);
+    self.run_stop.set_theme(theme.mode, theme.glass);
+    self.run_stop.set_focused(focused);
     // Code width follows the content size (window is fixed, maximize
     // still changes the viewport).
     self.code_width = (viewport.width - 48.0 - self.sidebar.width_value() - 136.0).max(40.0);
@@ -216,9 +225,20 @@ impl EditorUi {
     // live in it) and fills the whole viewport.
     self.sidebar.place(fonts, viewport.x, viewport.y, viewport.width, viewport.height);
     self.sidebar.draw(scene, fonts, images);
+    // Dead Run/Stop pair at the content top right (36px pill centered
+    // in the 64px content toolbar zone).
+    let col_w = self.sidebar.width_value();
+    let (pill_w, _) = self.run_stop.measure(fonts);
+    self.run_stop.place(
+      fonts,
+      viewport.x + viewport.width - SEARCH_PAD - pill_w,
+      viewport.y + (64.0 - 36.0) / 2.0,
+      pill_w,
+      36.0,
+    );
+    self.run_stop.draw(scene, fonts, images);
     // Functionless search capsule pinned to the sidebar bottom:
     // small height, full column width even while resizing.
-    let col_w = self.sidebar.width_value();
     self.search.place(
       fonts,
       viewport.x + SEARCH_PAD,
@@ -255,9 +275,11 @@ impl EditorUi {
     self.command.take()
   }
 
-  /// Hover only: traffic light glyphs and row highlights react.
+  /// Hover only: traffic light glyphs, row highlights and the pill
+  /// tint react.
   pub fn hover(&mut self, x: f32, y: f32) {
     self.sidebar.set_hover(x, y);
+    self.run_stop.mouse_move(x, y);
   }
 
   pub fn mouse_down(&mut self, x: f64, y: f64) {
@@ -266,10 +288,14 @@ impl EditorUi {
     // only takes focus and typing, it never searches.
     self.sidebar.mouse_down(x, y);
     self.search.mouse_down(x, y);
+    self.run_stop.mouse_down(x, y);
   }
 
   pub fn mouse_up(&mut self, x: f64, y: f64) {
     self.sidebar.mouse_up(x, y);
+    // No `on_action` on the pill pair: the press tint releases into
+    // nothing, by design.
+    self.run_stop.mouse_up(x, y);
   }
 
   pub fn mouse_wheel(&mut self, dx: f64, dy: f64) {
