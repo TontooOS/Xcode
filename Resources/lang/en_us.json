@@ -6,13 +6,14 @@
     "app.version": "Version {version}",
     "action.open": "Open...",
     "action.new_project": "New Project",
-    "recent.swiftiu": "SwiftIU",
-    "recent.swiftiu_path": "~/Desktop",
-    "recent.tux": "Tux",
-    "recent.tux_path": "~/Desktop/Tux.zip",
-    "recent.tux_zip": "Tux.zip",
-    "recent.tux_zip_path": "~/Desktop",
-    "recent.cmaps": "C Maps",
-    "recent.cmaps_path": "~/Desktop"
+    "recent.empty": "No Recent Projects",
+    "sheet.title": "Choose options for your new project:",
+    "sheet.app_name": "App Name:",
+    "sheet.app_version": "Version:",
+    "sheet.bundle_id": "Bundle ID:",
+    "sheet.cancel": "Cancel",
+    "sheet.create": "Create",
+    "sheet.ph_name": "MyApp",
+    "sheet.ph_version": "1.0"
   }
 }

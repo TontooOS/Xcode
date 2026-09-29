@@ -6,8 +6,9 @@ traffic lights. The only chrome at the top is a single round
 `BasicToolbar` pill with one `xmark` icon that closes the window. Below
 it, the app icon from `Resources/icon.tico` shows centered at 90px,
 followed by the bold `Xcode` title, a `Version 27.0` line, two example
-capsule buttons and a static scaled-down recents box mirroring the
-reference screenshot.
+capsule buttons and an empty recents box. `New Project` opens a modal
+options sheet on top (see `## NewProject Sheet`); the start page stays
+visible behind the dimmed backdrop.
 
 ## Layout
 
@@ -25,7 +26,8 @@ const WINDOW_HEIGHT: u32 = 585;
 | `title` | `BasicText` | `app.title` in `TextStyle::Headline` (17 semibold), centered |
 | `version` | `BasicText` | `app.version` in `TextStyle::Caption` with `TextForeground::Secondary`, centered |
 | `actions` | `HStack` | Two capsule `Button` elements: `action.open`, `action.new_project` (plain label, no icon); example `on_press` handlers only print |
-| `recents` | `RoundedRectangle` + rows | 330x255 container (`BUTTON_BG_DARK` / `BUTTON_BG_LIGHT`) with four static 48px rows (30px symbols, `Caption` name + `Caption2` path) and three `HorizontalDivider` elements; the first row sits on an accent `RoundedRectangle` selection fill |
+| `recents` | `RoundedRectangle` + `BasicText` | 330x255 container (`BUTTON_BG_DARK` / `BUTTON_BG_LIGHT`), empty by default with a centered dim `recent.empty` placeholder line |
+| `sheet` | `BasicSheet<NewProjectForm>` | Modal options card (`SheetSize::Small`, 380x266) over the dimmed start page; opened by `New Project`, closed by `Cancel` or ESC (see `## NewProject Sheet`) |
 
 ### Rules
 
@@ -37,11 +39,17 @@ const WINDOW_HEIGHT: u32 = 585;
   ever sees `mouse_down`; `mouse_up` synthesizes down+up at the release
   position instead, so releasing over the close pill or an action button
   fires it while releasing anywhere else (a real drag) does nothing.
-- The recents box is display-only: rows never handle mouse events. Row
-  text is scaled down with the box (`Caption` 12px names, `Caption2`
-  11px paths, 30px symbols in 48px rows).
-- The first row is selected: white name/path text and white symbol on
-  the live `palette.accent` fill. Other rows follow the theme text.
+- The recents box is display-only and empty by default: a centered dim
+  `recent.empty` line, no rows, no click handling.
+- The drag region is the whole window (`(0, 0, 420, 585)`) while no
+  sheet is up, so a press anywhere on the background drags the app. A
+  press inside the drag region starts a system drag instead of a click,
+  therefore no control ever sees `mouse_down`; `mouse_up` synthesizes
+  down+up at the release position instead, so releasing over the close
+  pill or an action button fires it while releasing anywhere else (a
+  real drag) does nothing.
+- An open sheet disables the drag region (`None`): every press reaches
+  the form fields, and dragging pauses until `Cancel` or ESC.
 - Action buttons use `set_palette` (`BUTTON_BG_DARK`/`WHITE` in dark
   mode, `BUTTON_BG_LIGHT`/`BLACK` in light mode) plus
   `set_theme(palette.accent, dark)`.
@@ -49,6 +57,43 @@ const WINDOW_HEIGHT: u32 = 585;
   glass pill and refracts the backdrop.
 - Returns `WindowCommand::Close` from `poll_window_command` when the
   close pill fires; action buttons never close.
+
+## NewProject Sheet
+
+`sheet::NewProjectForm` is the fixed 380x266 card content inside the
+`BasicSheet`: title, EN/DE locale switch, name/version/bundle ID
+fields, live bundle identifier preview and the button row.
+
+```rust
+pub fn update(&mut self, accent: Color, dark: bool, mode: ThemeMode, focused: bool)
+```
+
+### Structure
+
+| Row | Element | Description |
+|---|---|---|
+| `title` | `BasicText` | `sheet.title` in `TextStyle::Body` |
+| `locale` | `SegmentedPicker` | `EN` / `DE` switch next to the `sheet.app_name` label; selects whether the English or the German name field shows |
+| `name` | `BasicTextField` | English or German app name (placeholder `sheet.ph_name`); only the visible one takes typing |
+| `version` | `BasicTextField` | `sheet.app_version` label plus version field (placeholder `sheet.ph_version`) |
+| `org` | `BasicTextField` | `sheet.bundle_id` label plus organization field, prefilled with `de.arlomu` |
+| `preview` | `BasicText` | Live `{org}.{english_name}` line (`Caption`, `Secondary`); shows `AppName` while the English name is empty and `de.arlomu` while the org is empty; English only |
+| `buttons` | `HStack` | `Cancel` left, `Create` right (capsule `Button` elements) |
+
+### Rules
+
+- The start page stays mounted behind the dimmed backdrop; the sheet
+  fades in via `show()` and out via `dismiss()`.
+- `New Project` raises a flag consumed in `draw`, which calls
+  `sheet.show()`. `Cancel` raises a flag consumed the same way, which
+  calls `sheet.dismiss()`. ESC also dismisses (handled by
+  `BasicSheet::key`). `Create` is an example and only prints.
+- `App::text` and `App::key` route into the form only while the sheet
+  is visible; the I-beam cursor (`CursorKind::Text`) follows field
+  selection through a polled flag.
+- Switching the locale deselects the hidden name field, so typing never
+  lands in the invisible field.
+- No serde usage: all strings come from `lang::t`.
 
 ## Icon Pipeline
 
@@ -115,9 +160,10 @@ pub fn t(key: &str) -> String
 cargo run
 ```
 
-Prints `open pressed (example)` or `new project pressed (example)` to
-stdout when an example button is pressed. Closing works through the
-`xmark` pill only.
+Prints `open pressed (example)` to stdout when `Open...` is pressed
+(`New Project` opens the options sheet instead). `Create` prints
+`create pressed (example)` and does nothing else. Closing works through
+the `xmark` pill or the sheet `Cancel` button only.
 
 ## Cross References
 

@@ -5,11 +5,12 @@
 //! no traffic lights, only one round toolbar button with an `xmark`
 //! glyph at the top left (closes the window), the centered app icon
 //! from `Resources/icon.tico` rendered through CoreIcon in its normal
-//! (light) variant, the `Xcode` title with a `Version 27.0` line,
-//! three example capsule buttons (`Open...`, `New Project`)
-//! and a static scaled-down recents box mirroring the reference
-//! screenshot (SwiftIU, Tux, Tux.zip, C Maps with the first row
-//! selected).
+//! (light) variant, the `Xcode` title with a `Version 27.0` line, two
+//! example capsule buttons (`Open...`, `New Project`) and an empty
+//! recents box. `New Project` opens a modal sheet on top with the
+//! project options (EN/DE app name, version, bundle ID, live bundle
+//! identifier preview, `Cancel` / `Create`); the start page stays
+//! visible behind the dimmed backdrop.
 //!
 //! All text uses SF Pro (system font) with `en_us` and `de_de` strings
 //! from `lang/` via Accessibility. The theme follows the settings
@@ -18,6 +19,7 @@
 
 mod icon;
 mod lang;
+mod sheet;
 
 sdk::preinclude!();
 
@@ -25,16 +27,20 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use TontooUI::elements::{
-  Align, BasicText, BasicToolbar, Button, ButtonShape, FileImage, HStack,
-  HorizontalDivider, ImageFit, RoundedRectangle, SFSymbolImage, ShapeFill,
-  TextAlignment, TextForeground, TextStyle, ToolbarPlacement, View, VStack,
-  BUTTON_BG_DARK, BUTTON_BG_LIGHT,
+  Align, BasicSheet, BasicText, BasicToolbar, Button, ButtonShape, FileImage,
+  HStack, ImageFit, RoundedRectangle, ShapeFill, SheetSize, TextAlignment,
+  TextForeground, TextStyle, ToolbarPlacement, View, BUTTON_BG_DARK,
+  BUTTON_BG_LIGHT,
 };
-use TontooUI::renderer::window::{App, Viewport, WindowCommand, run};
+use TontooUI::renderer::window::{
+  App, CursorKind, Key, Viewport, WindowCommand, run,
+};
 use TontooUI::renderer::{FontSystem, ImageLoader};
 use TontooUI::theme::{ThemeMode, ThemeWatcher};
 use vello::Scene;
 use vello::peniko::Color;
+
+use crate::sheet::NewProjectForm;
 
 const WINDOW_WIDTH: u32 = 420;
 const WINDOW_HEIGHT: u32 = 585;
@@ -42,32 +48,8 @@ const ICON_PX: f32 = 90.0;
 const ICON_RADIUS: f32 = 21.0;
 const CONTENT_WIDTH: f32 = 330.0;
 const TEXT_WIDTH: f32 = 330.0;
-const ROW_H: f32 = 48.0;
-const DIV_H: f32 = 1.0;
-const BOX_PAD: f32 = 6.0;
-const ROW_PAD_X: f32 = 9.0;
-const ROW_ICON: f32 = 30.0;
 const RECENTS_BOX_H: f32 = 255.0;
 const VERSION: &str = "27.0";
-
-/// One static recent row: icon plus name/path text column (scaled-down
-/// text so the whole list reads 25% smaller: Caption name, Caption2 path).
-fn recent_row(symbol: &str, name: String, path: String) -> HStack {
-  let texts = VStack::new()
-    .spacing(1.5)
-    .align(Align::Leading)
-    .child(BasicText::new(name).style(TextStyle::Caption))
-    .child(
-      BasicText::new(path)
-        .style(TextStyle::Caption2)
-        .foreground(TextForeground::Secondary),
-    );
-  HStack::new()
-    .spacing(9.0)
-    .align(Align::Center)
-    .child(SFSymbolImage::new(symbol).size(ROW_ICON))
-    .child(texts)
-}
 
 struct StartPage {
   close_bar: BasicToolbar,
@@ -76,10 +58,12 @@ struct StartPage {
   title: BasicText,
   version: BasicText,
   actions: HStack,
-  rows: Vec<HStack>,
-  dividers: Vec<HorizontalDivider>,
+  empty_label: BasicText,
   box_bg: RoundedRectangle,
-  selection_bg: RoundedRectangle,
+  sheet: BasicSheet<NewProjectForm>,
+  show_sheet: Rc<Cell<bool>>,
+  cancel_sheet: Rc<Cell<bool>>,
+  sheet_ibeam: Cell<bool>,
   watcher: ThemeWatcher,
   focused: bool,
   bg: Color,
@@ -106,6 +90,10 @@ impl StartPage {
     .alignment(TextAlignment::Center)
     .width(TEXT_WIDTH);
 
+    let show_sheet = Rc::new(Cell::new(false));
+    let show_pressed = show_sheet.clone();
+    let cancel_sheet = Rc::new(Cell::new(false));
+
     let actions = HStack::new()
       .spacing(9.0)
       .align(Align::Center)
@@ -117,32 +105,19 @@ impl StartPage {
       .child(
         Button::new(lang::t("action.new_project"))
           .shape(ButtonShape::Capsule)
-          .on_press(|| println!("new project pressed (example)")),
+          .on_press(move || show_pressed.set(true)),
       );
 
-    let rows = vec![
-      recent_row(
-        "hammer.fill",
-        lang::t("recent.swiftiu"),
-        lang::t("recent.swiftiu_path"),
-      ),
-      recent_row("doc.fill", lang::t("recent.tux"), lang::t("recent.tux_path")),
-      recent_row(
-        "archivebox.fill",
-        lang::t("recent.tux_zip"),
-        lang::t("recent.tux_zip_path"),
-      ),
-      recent_row(
-        "doc.fill",
-        lang::t("recent.cmaps"),
-        lang::t("recent.cmaps_path"),
-      ),
-    ];
-    let dividers = vec![
-      HorizontalDivider::new(),
-      HorizontalDivider::new(),
-      HorizontalDivider::new(),
-    ];
+    // The recents box starts empty: no example projects, only a dim
+    // placeholder line. Rows are added here once projects exist.
+    let empty_label = BasicText::new(lang::t("recent.empty"))
+      .style(TextStyle::Callout)
+      .foreground(TextForeground::Secondary)
+      .alignment(TextAlignment::Center)
+      .width(CONTENT_WIDTH - 32.0);
+
+    let sheet = BasicSheet::new(NewProjectForm::new(cancel_sheet.clone()))
+      .size(SheetSize::Small);
 
     Self {
       close_bar,
@@ -153,12 +128,13 @@ impl StartPage {
       title,
       version,
       actions,
-      rows,
-      dividers,
+      empty_label,
       box_bg: RoundedRectangle::new(CONTENT_WIDTH, RECENTS_BOX_H, 12.0)
         .fill(BUTTON_BG_DARK),
-      selection_bg: RoundedRectangle::new(CONTENT_WIDTH, ROW_H, 8.0)
-        .fill(Color::from_rgb8(0x00, 0x7a, 0xff)),
+      sheet,
+      show_sheet,
+      cancel_sheet,
+      sheet_ibeam: Cell::new(false),
       watcher: ThemeWatcher::new(),
       focused: true,
       bg: TontooUI::renderer::window::BACKGROUND,
@@ -217,53 +193,26 @@ impl App for StartPage {
       BUTTON_BG_LIGHT
     }));
     self.box_bg.set_focused(focused);
-    self.selection_bg.set_fill(ShapeFill::Solid(palette.accent));
-    self.selection_bg.set_focused(focused);
+    self.empty_label.set_theme(theme.mode);
+    self.empty_label.set_focused(focused);
 
-    // Recent rows: first row is selected (white text/icon on the
-    // accent fill), the rest follow the theme. Static example data:
-    // no click handling, display only.
-    for (index, row) in self.rows.iter_mut().enumerate() {
-      let selected = index == 0;
-      if let Some(symbol) = row.child_mut::<SFSymbolImage>(0) {
-        if selected {
-          symbol.set_color(Some(Color::WHITE));
-        } else {
-          symbol.set_color(None);
-          symbol.set_theme(palette.text, dark);
-        }
-        symbol.set_focused(focused);
-      }
-      if let Some(texts) = row.child_mut::<VStack>(1) {
-        if let Some(name) = texts.child_mut::<BasicText>(0) {
-          if selected {
-            name.set_foreground(TextForeground::Color(Color::WHITE));
-          } else {
-            name.set_foreground(TextForeground::Primary);
-            name.set_theme(theme.mode);
-          }
-          name.set_focused(focused);
-        }
-        if let Some(path) = texts.child_mut::<BasicText>(1) {
-          if selected {
-            path.set_foreground(TextForeground::Color(Color::from_rgba8(
-              255, 255, 255, 220,
-            )));
-          } else {
-            path.set_foreground(TextForeground::Secondary);
-            path.set_theme(theme.mode);
-          }
-          path.set_focused(focused);
-        }
-      }
+    // New-project sheet: live theme plus derived form state (bundle
+    // identifier preview, locale switching). Open/close requests from
+    // the buttons are polled here.
+    self.sheet.set_theme(dark);
+    self.sheet.set_focused(focused);
+    self.sheet.child_mut().update(palette.accent, dark, theme.mode, focused);
+    self.sheet.child_mut().set_focused(focused);
+    if self.show_sheet.take() {
+      self.sheet.show();
     }
-    for divider in self.dividers.iter_mut() {
-      divider.set_theme(palette.divider, dark);
-      divider.set_focused(focused);
+    if self.cancel_sheet.take() {
+      self.sheet.dismiss();
     }
 
     // Layout: close button top left, everything else centered below.
-    let (vx, vy, vw) = (viewport.x, viewport.y, viewport.width);
+    let (vx, vy, vw, vh) = (viewport.x, viewport.y, viewport.width, viewport.height);
+    self.sheet.set_viewport(vx, vy, vw, vh);
     self.close_bar.place(fonts, vx + 12.0, vy + 12.0, 36.0, 36.0);
     self.close_bar.draw(scene, fonts, images);
 
@@ -290,32 +239,22 @@ impl App for StartPage {
     self.actions.draw(scene, fonts, images);
     cy += actions_h + 14.0;
 
-    // Recents box with the selected first row on accent fill.
+    // Empty recents box with a centered dim placeholder line.
     let bx = center(CONTENT_WIDTH);
     self.box_bg.place(fonts, bx, cy, CONTENT_WIDTH, RECENTS_BOX_H);
     self.box_bg.draw(scene, fonts, images);
-    self.selection_bg.place(
+    let (empty_w, empty_h) = self.empty_label.measure(fonts);
+    self.empty_label.place(
       fonts,
-      bx + BOX_PAD,
-      cy + BOX_PAD,
-      CONTENT_WIDTH - BOX_PAD * 2.0,
-      ROW_H,
+      bx + ((CONTENT_WIDTH - empty_w) / 2.0).max(0.0),
+      cy + ((RECENTS_BOX_H - empty_h) / 2.0).max(0.0),
+      empty_w,
+      empty_h,
     );
-    self.selection_bg.draw(scene, fonts, images);
+    self.empty_label.draw(scene, fonts, images);
 
-    let row_w = CONTENT_WIDTH - BOX_PAD * 2.0 - ROW_PAD_X * 2.0;
-    let mut ry = cy + BOX_PAD;
-    for (index, row) in self.rows.iter_mut().enumerate() {
-      row.place(fonts, bx + BOX_PAD + ROW_PAD_X, ry, row_w, ROW_H);
-      row.draw(scene, fonts, images);
-      ry += ROW_H;
-      if index < self.dividers.len() {
-        let divider = &mut self.dividers[index];
-        divider.place(fonts, bx + BOX_PAD + ROW_PAD_X, ry, row_w, DIV_H);
-        divider.draw(scene, fonts, images);
-        ry += DIV_H;
-      }
-    }
+    // Modal new-project sheet on top: dims the start page, fades in.
+    self.sheet.draw(scene, fonts, images);
   }
 
   fn background(&self) -> Color {
@@ -329,6 +268,11 @@ impl App for StartPage {
   }
 
   fn drag_region(&self) -> Option<(f32, f32, f32, f32)> {
+    // Background drag only while no sheet is up: an open sheet needs
+    // every press for its fields, so dragging pauses until Cancel/ESC.
+    if self.sheet.is_visible() {
+      return None;
+    }
     // The whole window background drags the app: a press anywhere
     // starts a system drag instead of a click (see `mouse_up`, which
     // re-fires releases over controls so buttons keep working).
@@ -343,12 +287,21 @@ impl App for StartPage {
   }
 
   fn mouse_down(&mut self, _x: f64, _y: f64) {
-    // Unreachable for the left button: the drag region covers the whole
-    // window, so every press starts a system drag and never reaches the
-    // controls. Clicks are synthesized in `mouse_up` instead.
+    // Unreachable for the left button while no sheet is up: the drag
+    // region covers the whole window, so every press starts a system
+    // drag and never reaches the controls. Clicks are synthesized in
+    // `mouse_up` instead. An open sheet disables the drag region, so
+    // its presses arrive here and go straight into the form.
+    if self.sheet.is_visible() {
+      self.sheet.mouse_down(_x, _y);
+    }
   }
 
   fn mouse_up(&mut self, x: f64, y: f64) {
+    if self.sheet.is_visible() {
+      self.sheet.mouse_up(x, y);
+      return;
+    }
     // No control ever sees `mouse_down` (see `drag_region` / `mouse_down`),
     // so synthesize down+up at the release position: releasing over the
     // close pill or an action button fires it, releasing anywhere else
@@ -364,11 +317,44 @@ impl App for StartPage {
   fn mouse_move(&mut self, x: f64, y: f64) {
     self.close_bar.mouse_move(x as f32, y as f32);
     self.each_action_button(|button| button.set_hover(x as f32, y as f32));
+    if self.sheet.is_visible() {
+      self.sheet.child_mut().set_hover(x as f32, y as f32);
+      self.sheet_ibeam.set(self.sheet.child_mut().wants_text_cursor());
+    } else {
+      self.sheet_ibeam.set(false);
+    }
+  }
+
+  fn text(&mut self, content: &str) {
+    if self.sheet.is_visible() {
+      self.sheet.child_mut().text(content);
+      self.sheet_ibeam.set(self.sheet.child_mut().wants_text_cursor());
+    }
+  }
+
+  fn key(&mut self, key: Key) {
+    if self.sheet.is_visible() {
+      // ESC dismisses the sheet; anything else goes to the form fields.
+      if !self.sheet.key(key) {
+        self.sheet.child_mut().key(key);
+      }
+      self.sheet_ibeam.set(self.sheet.child_mut().wants_text_cursor());
+    }
+  }
+
+  fn cursor(&self, _x: f64, _y: f64) -> CursorKind {
+    if self.sheet_ibeam.get() {
+      CursorKind::Text
+    } else {
+      CursorKind::Default
+    }
   }
 
   fn set_focused(&mut self, focused: bool) {
     self.focused = focused;
     self.close_bar.set_focused(focused);
+    self.sheet.set_focused(focused);
+    self.sheet.child_mut().set_focused(focused);
   }
 }
 

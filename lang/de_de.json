@@ -4,15 +4,16 @@
     "name": "Xcode",
     "app.title": "Xcode",
     "app.version": "Version {version}",
-    "action.open": "Open...",
+    "action.open": "Öffnen...",
     "action.new_project": "New Project",
-    "recent.swiftiu": "SwiftIU",
-    "recent.swiftiu_path": "~/Desktop",
-    "recent.tux": "Tux",
-    "recent.tux_path": "~/Desktop/Tux.zip",
-    "recent.tux_zip": "Tux.zip",
-    "recent.tux_zip_path": "~/Desktop",
-    "recent.cmaps": "C Maps",
-    "recent.cmaps_path": "~/Desktop"
+    "recent.empty": "Keine recenten Projekte",
+    "sheet.title": "Wähle Optionen für dein neues Projekt:",
+    "sheet.app_name": "App-Name:",
+    "sheet.app_version": "Version:",
+    "sheet.bundle_id": "Bundle-ID:",
+    "sheet.cancel": "Abbrechen",
+    "sheet.create": "Erstellen",
+    "sheet.ph_name": "MyApp",
+    "sheet.ph_version": "1.0"
   }
 }
