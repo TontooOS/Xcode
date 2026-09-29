@@ -350,7 +350,8 @@ impl EditorUi {
   }
 
   pub fn wants_backdrop(&self) -> bool {
-    self.sidebar.wants_backdrop()
+    // Frosted menu popup needs the blur pass while open.
+    self.sidebar.wants_backdrop() || self.device.is_open()
   }
 
   pub fn drag_rect(&self) -> (f32, f32, f32, f32) {
