@@ -154,7 +154,11 @@ next to `XCODE_PROJECT_NAME`).
   `check.indexing` (`Indexing Files...`) label sits left of the
   performance pill. A keystroke after the job start cancels it (the
   child is killed) and a fresh job starts once typing stops again;
-  stale generations are dropped. The cargo binary resolves through
+  stale generations are dropped. Output lines collect into two
+  buckets (`collect_diagnostics`): crate-relative paths first
+  (own code, up to 2000), absolute dependency paths after (up to
+  200), since dependencies check first and would otherwise flood
+  the cap before the crate's own errors arrive. The cargo binary resolves through
   `cargo_program` (`CARGO` env, then `~/.cargo/bin/cargo`,
   `/root/.cargo/bin/cargo`, `/usr/local/cargo/bin/cargo`, then
   `PATH`, since the supervisor chain does not always inherit the

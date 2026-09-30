@@ -51,6 +51,10 @@ pub fn cargo_program() -> String {
   "cargo".to_string()
 }/// Max diagnostics kept per run (the warnings list stays usable).
 pub const MAX_DIAGNOSTICS: usize = 200;
+/// Max collected diagnostics with crate-relative paths (own code).
+pub const MAX_COLLECT_RELATIVE: usize = 2000;
+/// Max collected diagnostics with other paths (dependencies).
+pub const MAX_COLLECT_OTHER: usize = 200;
 /// Max title chars per warning row (rustc messages can be long).
 pub const MAX_TITLE_CHARS: usize = 140;
 
@@ -158,6 +162,42 @@ pub fn parse_message_line(line: &str) -> Vec<CheckDiagnostic> {
     .collect()
 }
 
+/// Push one output line into the two collection buckets: relative
+/// paths come from the checked crate itself (rustc relativizes them
+/// against the working directory), absolute ones from dependencies.
+/// Dependencies check first and can emit hundreds of warnings, so
+/// without buckets they would fill the cap before the crate's own
+/// errors even arrive.
+fn push_line(
+  relative: &mut Vec<CheckDiagnostic>,
+  other: &mut Vec<CheckDiagnostic>,
+  line: &str,
+) {
+  for diag in parse_message_line(line) {
+    if std::path::Path::new(&diag.file).is_relative() {
+      if relative.len() < MAX_COLLECT_RELATIVE {
+        relative.push(diag);
+      }
+    } else if other.len() < MAX_COLLECT_OTHER {
+      other.push(diag);
+    }
+  }
+}
+
+/// Collect diagnostics from cargo output lines, own-crate messages
+/// first. Pure over lines (cancellation stays in the worker loop).
+pub fn collect_diagnostics<I: Iterator<Item = String>>(
+  lines: I,
+) -> Vec<CheckDiagnostic> {
+  let mut relative = Vec::new();
+  let mut other = Vec::new();
+  for line in lines {
+    push_line(&mut relative, &mut other, &line);
+  }
+  relative.extend(other);
+  relative
+}
+
 /// Short row title for a diagnostic (`code` appended when present,
 /// clamped to `MAX_TITLE_CHARS`).
 pub fn diagnostic_title(diag: &CheckDiagnostic) -> String {
@@ -213,7 +253,8 @@ pub fn spawn_check(
       *slot = Some(child);
     }
     let mut ran = false;
-    let mut diagnostics = Vec::new();
+    let mut relative = Vec::new();
+    let mut other = Vec::new();
     if let Some(out) = stdout {
       ran = true;
       for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
@@ -221,9 +262,7 @@ pub fn spawn_check(
           kill_slot(&child_slot);
           return;
         }
-        if diagnostics.len() < MAX_DIAGNOSTICS {
-          diagnostics.extend(parse_message_line(&line));
-        }
+        push_line(&mut relative, &mut other, &line);
       }
     }
     if let Ok(mut slot) = child_slot.lock() {
@@ -236,6 +275,8 @@ pub fn spawn_check(
       return;
     }
     if ran {
+      relative.extend(other);
+      let diagnostics = relative;
       eprintln!(
         "[xcode-check] done gen={generation} diagnostics={}",
         diagnostics.len()
@@ -310,6 +351,30 @@ mod tests {
       None => std::env::remove_var("CARGO"),
     }
     assert!(!cargo_program().trim().is_empty());
+  }
+
+  #[test]
+  fn collect_prefers_own_crate_over_dependencies() {
+    fn dep_warning(i: usize) -> String {
+      format!("{{\"reason\":\"compiler-message\",\"message\":{{\"message\":\"dep warn {i}\",\"code\":null,\"level\":\"warning\",\"spans\":[{{\"file_name\":\"/root/.cargo/registry/dep/lib.rs\",\"line_start\":1,\"line_end\":1,\"column_start\":1,\"column_end\":2,\"is_primary\":true}}],\"children\":[],\"rendered\":null}}}}")
+    }
+    fn own_error(line: u64) -> String {
+      format!("{{\"reason\":\"compiler-message\",\"message\":{{\"message\":\"own error\",\"code\":{{\"code\":\"E0433\",\"explanation\":null}},\"level\":\"error\",\"spans\":[{{\"file_name\":\"src/app.rs\",\"line_start\":{line},\"line_end\":{line},\"column_start\":5,\"column_end\":6,\"is_primary\":true}}],\"children\":[],\"rendered\":null}}}}")
+    }
+    let mut lines = Vec::new();
+    // Dependencies check first and flood the stream.
+    for i in 0..300 {
+      lines.push(dep_warning(i));
+    }
+    lines.push(own_error(8));
+    lines.push(own_error(19));
+    let diags = collect_diagnostics(lines.into_iter());
+    // Dependency bucket caps at 200, both own errors survive on top.
+    assert_eq!(diags.len(), MAX_COLLECT_OTHER + 2);
+    assert_eq!(diags[0].file, "src/app.rs");
+    assert_eq!(diags[0].line, 8);
+    assert_eq!(diags[1].file, "src/app.rs");
+    assert_eq!(diags[1].line, 19);
   }
 
   #[test]
