@@ -26,7 +26,7 @@ use crate::TontooUI::elements::{
   TextForeground, TextStyle, View, VStack, SCROLLBAR_W_HOVER,
 };
 use crate::TontooUI::renderer::window::Key;
-use crate::TontooUI::renderer::{FontSystem, ImageLoader};
+use crate::TontooUI::renderer::{FontSystem, ImageLoader, RichSpan};
 use crate::TontooUI::theme::ThemeMode;
 
 /// Gray gutter width for line numbers.
@@ -118,16 +118,86 @@ fn build_rows(text: &str, dark: bool) -> VStack {
   rows
 }
 
-fn advance_of(fonts: &mut FontSystem, text: &str) -> f32 {
-  if text.is_empty() {
+/// Advance of `line[..upto]` in logical px, measured through the
+/// same rich monospace DocumentKit layout the code rows render with
+/// (bold runs included). The plain proportional probe used before
+/// made the selection wash and the caret drift off the letters.
+///
+/// A trailing `"X"` sentinel in the prefix style keeps whitespace
+/// prefixes measurable: CoreText collapses whitespace-only strings
+/// to zero width, which snapped clicks at an indent to the first
+/// visible glyph instead of the line start.
+fn rich_advance(
+  fonts: &mut FontSystem,
+  line: &str,
+  dark: bool,
+  upto: usize,
+) -> f32 {
+  let upto = upto.min(line.len());
+  if upto == 0 {
     return 0.0;
   }
-  let layout = fonts.layout_text(text, CODE_FONT_SIZE, Color::WHITE, None);
-  FontSystem::layout_size(&layout).0 / fonts.scale
+  let mut content = String::new();
+  let mut rich = Vec::new();
+  let mut style = (false, false);
+  for span in highlight_spans(line, dark) {
+    if content.len() >= upto {
+      break;
+    }
+    let take = (upto - content.len()).min(span.text.len());
+    let Some(piece) = span.text.get(..take) else {
+      break;
+    };
+    let start = content.len();
+    content.push_str(piece);
+    style = (span.bold, span.italic);
+    rich.push(RichSpan {
+      range: start..content.len(),
+      bold: span.bold,
+      italic: span.italic,
+      monospace: true,
+      ..Default::default()
+    });
+  }
+  if content.is_empty() {
+    return 0.0;
+  }
+  let sentinel_at = content.len();
+  content.push('X');
+  rich.push(RichSpan {
+    range: sentinel_at..content.len(),
+    bold: style.0,
+    italic: style.1,
+    monospace: true,
+    ..Default::default()
+  });
+  let frame =
+    fonts.layout_rich_text(&content, CODE_FONT_SIZE, Color::WHITE, None, &rich);
+  let full = FontSystem::layout_size(&frame).0 / fonts.scale;
+  let solo = fonts.layout_rich_text(
+    "X",
+    CODE_FONT_SIZE,
+    Color::WHITE,
+    None,
+    &[RichSpan {
+      range: 0..1,
+      bold: style.0,
+      italic: style.1,
+      monospace: true,
+      ..Default::default()
+    }],
+  );
+  full - FontSystem::layout_size(&solo).0 / fonts.scale
 }
 
-/// Byte caret at visual `goal_x` inside `line` (nearest advance).
-fn col_at_x(fonts: &mut FontSystem, line: &str, goal_x: f32) -> usize {
+/// Byte caret at visual `goal_x` inside `line` (nearest advance,
+/// measured with the rich monospace layout).
+fn col_at_x(
+  fonts: &mut FontSystem,
+  line: &str,
+  dark: bool,
+  goal_x: f32,
+) -> usize {
   let goal = goal_x.max(0.0);
   let mut bounds = vec![0usize];
   let mut at = 0usize;
@@ -142,7 +212,7 @@ fn col_at_x(fonts: &mut FontSystem, line: &str, goal_x: f32) -> usize {
   }
   let mut adv = |k: usize| -> f32 {
     match line.get(..bounds[k]) {
-      Some(slice) => advance_of(fonts, slice),
+      Some(_) => rich_advance(fonts, line, dark, bounds[k]),
       None => 0.0,
     }
   };
@@ -674,7 +744,7 @@ impl CodeEditor {
     let code_x = self.rect.0 + CODE_GUTTER_W + CODE_GAP;
     let goal = (x - code_x).max(0.0);
     let target = lines.get(line).cloned().unwrap_or_default();
-    let col = col_at_x(fonts, &target, goal);
+    let col = col_at_x(fonts, &target, self.dark, goal);
     self.caret_from_line_col(line, col)
   }
 
@@ -859,30 +929,27 @@ impl View for CodeEditor {
         let lo = sa.max(start).min(end);
         let hi = sb.max(start).min(end);
         if lo < hi {
-          if let (Some(before), Some(within)) =
-            (line.get(..lo - start), line.get(..hi - start))
+          let dark = self.dark;
+          let x0 = rich_advance(fonts, line, dark, lo - start);
+          let x1 = rich_advance(fonts, line, dark, hi - start);
+          let cy =
+            self.rect.1 + index as f32 * CODE_LINE_H - offset;
+          if cy + CODE_LINE_H >= self.rect.1
+            && cy <= self.rect.1 + self.rect.3
           {
-            let x0 = advance_of(fonts, before);
-            let x1 = advance_of(fonts, within);
-            let cy =
-              self.rect.1 + index as f32 * CODE_LINE_H - offset;
-            if cy + CODE_LINE_H >= self.rect.1
-              && cy <= self.rect.1 + self.rect.3
-            {
-              let cx = self.rect.0 + CODE_GUTTER_W + CODE_GAP;
-              scene.fill(
-                Fill::NonZero,
-                Affine::IDENTITY,
-                &Brush::Solid(wash),
-                None,
-                &Rect::new(
-                  px(cx + x0),
-                  px(cy + 1.0),
-                  px(cx + x1),
-                  px(cy + CODE_LINE_H - 3.0),
-                ),
-              );
-            }
+            let cx = self.rect.0 + CODE_GUTTER_W + CODE_GAP;
+            scene.fill(
+              Fill::NonZero,
+              Affine::IDENTITY,
+              &Brush::Solid(wash),
+              None,
+              &Rect::new(
+                px(cx + x0),
+                px(cy + 1.0),
+                px(cx + x1),
+                px(cy + CODE_LINE_H - 3.0),
+              ),
+            );
           }
         }
         start = end + 1;
@@ -892,9 +959,12 @@ impl View for CodeEditor {
       let (line, col) = self.line_col();
       let lines = self.lines();
       let current = lines.get(line).cloned().unwrap_or_default();
-      let prefix = current.get(..col.min(current.len())).unwrap_or("");
-      let cx =
-        self.rect.0 + CODE_GUTTER_W + CODE_GAP + advance_of(fonts, prefix);
+      let dark = self.dark;
+      let upto = col.min(current.len());
+      let cx = self.rect.0
+        + CODE_GUTTER_W
+        + CODE_GAP
+        + rich_advance(fonts, &current, dark, upto);
       let cy =
         self.rect.1 + line as f32 * CODE_LINE_H - self.bar.offset();
       if cy + CODE_LINE_H >= self.rect.1
@@ -1087,5 +1157,61 @@ mod tests {
     ed.bar.set_content(ed.content_h(), 200.0);
     assert!(!ed.scrollable());
     assert_eq!(ed.max_offset(), 0.0);
+  }
+
+  #[test]
+  fn rich_advance_matches_rendered_layout() {
+    let mut fonts = FontSystem::new();
+    // A line with bold keyword runs: the wash must use the same
+    // rich monospace layout the row renders with, not a plain
+    // proportional probe.
+    let line = "use std::collections::HashMap;";
+    let full = rich_advance(&mut fonts, line, true, line.len());
+    let mut content = String::new();
+    let mut rich = Vec::new();
+    for span in highlight_spans(line, true) {
+      let start = content.len();
+      content.push_str(&span.text);
+      rich.push(RichSpan {
+        range: start..content.len(),
+        bold: span.bold,
+        italic: span.italic,
+        monospace: true,
+        ..Default::default()
+      });
+    }
+    let frame = fonts.layout_rich_text(
+      &content,
+      CODE_FONT_SIZE,
+      Color::WHITE,
+      None,
+      &rich,
+    );
+    let (tw, _) = FontSystem::layout_size(&frame);
+    assert!((full - tw / fonts.scale).abs() < 0.01);
+    assert_eq!(rich_advance(&mut fonts, line, true, 0), 0.0);
+    // Advances grow monotonically over char boundaries.
+    let mut prev = 0.0;
+    let mut at = 0usize;
+    while at < line.len() {
+      at += line[at..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+      let w = rich_advance(&mut fonts, line, true, at);
+      assert!(w >= prev);
+      prev = w;
+    }
+    assert!(prev > 0.0);
+  }
+
+  #[test]
+  fn col_at_x_roundtrips_rich_layout() {
+    let mut fonts = FontSystem::new();
+    let line = "    title: String,";
+    assert_eq!(col_at_x(&mut fonts, line, true, -10.0), 0);
+    assert_eq!(col_at_x(&mut fonts, line, true, 1e6), line.len());
+    // The middle of the line maps back near its own advance.
+    let mid = line.len() / 2;
+    let x = rich_advance(&mut fonts, line, true, mid);
+    let hit = col_at_x(&mut fonts, line, true, x);
+    assert!((hit as isize - mid as isize).abs() <= 1);
   }
 }
