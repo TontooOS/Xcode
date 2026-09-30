@@ -276,6 +276,18 @@ impl EditorUi {
     }
   }
 
+  /// Advance fake stats and logs on every page with the frame time
+  /// (one sample plus one log line per second, example only).
+  fn tick_code_pages(&mut self, now_secs: f64) {
+    for index in 0..5 {
+      if let Some(page) = self.sidebar.page_mut(index) {
+        if let Some(ed) = page.as_any_mut().downcast_mut::<CodeEditor>() {
+          ed.tick(now_secs);
+        }
+      }
+    }
+  }
+
   fn refresh_code_ibeam(&mut self) {
     let mut hovered = false;
     for index in 0..5 {
@@ -341,6 +353,8 @@ impl EditorUi {
     }
     // Code pages follow the theme with live highlight colors.
     self.theme_code_pages(palette.accent, mode, dark, focused);
+    // Fake stats and logs advance with the frame time.
+    self.tick_code_pages(time_secs);
 
     // No titlebar: the sidebar owns the decoration (traffic lights
     // live in it) and fills the whole viewport.

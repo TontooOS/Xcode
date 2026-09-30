@@ -17,16 +17,18 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use vello::Scene;
-use vello::kurbo::{Affine, Rect};
+use vello::kurbo::{Affine, BezPath, Cap, Join, Rect, Stroke};
 use vello::peniko::{Brush, Color, Fill};
 
 use crate::DocumentKit::{SyntaxLang, highlight_syntax as highlight};
 use crate::TontooUI::elements::{
   Align, BasicText, FormattedText, HStack, Scrollbar, Span, TextAlignment,
-  TextForeground, TextStyle, View, VStack, SCROLLBAR_W_HOVER,
+  TextForeground, TextStyle, View, VStack, DIVIDER_DARK, DIVIDER_LIGHT,
+  SCROLLBAR_W_HOVER, TEXTFIELD_PLACEHOLDER_DARK,
+  TEXTFIELD_PLACEHOLDER_LIGHT,
 };
 use crate::TontooUI::renderer::window::Key;
-use crate::TontooUI::renderer::{FontSystem, ImageLoader, RichSpan};
+use crate::TontooUI::renderer::{FontSystem, ImageLoader, RichSpan, draw_layout};
 use crate::TontooUI::theme::ThemeMode;
 
 /// Gray gutter width for line numbers.
@@ -281,6 +283,11 @@ fn clipboard_set(text: &str) {
   }
 }
 
+/// Point inside a logical rect.
+fn point_in(r: (f32, f32, f32, f32), x: f32, y: f32) -> bool {
+  x >= r.0 && x <= r.0 + r.2 && y >= r.1 && y <= r.1 + r.3
+}
+
 #[derive(Clone)]
 struct UndoState {
   text: String,
@@ -292,9 +299,37 @@ struct UndoState {
 /// Overlay bar width in logical px. Matches the hover width of the
 /// standard `Scrollbar` so the thumb never covers more than needed.
 pub const CODE_BAR_W: f32 = SCROLLBAR_W_HOVER;
+/// Bottom panel default height in logical px.
+pub const PANEL_DEFAULT_H: f32 = 180.0;
+/// Bottom panel minimum height while expanded.
+pub const PANEL_MIN_H: f32 = 100.0;
+/// Bottom panel maximum height.
+pub const PANEL_MAX_H: f32 = 420.0;
+/// Divider strip height between code and panel.
+pub const PANEL_DIV_H: f32 = 10.0;
+/// Stats share of the panel width (logs take the rest).
+pub const PANEL_STATS_SPLIT: f32 = 0.6;
+/// Drag distance in logical px before a divider press becomes a
+/// resize instead of a collapse toggle.
+pub const PANEL_DRAG_SLOP: f32 = 4.0;
+/// Fake stats samples kept (60s at one sample per second).
+pub const STATS_CAP: usize = 60;
+/// Fake log lines kept.
+pub const LOGS_CAP: usize = 300;
+/// Seconds between fake samples and log lines.
+pub const TICK_SECONDS: f64 = 1.0;
+/// Log text size in logical px.
+pub const LOG_FONT_SIZE: f32 = 12.0;
+/// Log row height in logical px.
+pub const LOG_LINE_H: f32 = 16.0;
+/// Panel header height in logical px.
+pub const PANEL_HEADER_H: f32 = 20.0;
+/// Panel label text size in logical px.
+pub const PANEL_LABEL_SIZE: f32 = 11.0;
 
-/// Editable code page: TontooUI rows plus caret, selection and the
-/// standard overlay `Scrollbar`.
+/// Editable code page: TontooUI rows plus caret, selection, the
+/// standard overlay `Scrollbar` and a collapsible bottom panel with
+/// fake performance stats and logs.
 pub struct CodeEditor {
   text: String,
   caret: usize,
@@ -316,6 +351,30 @@ pub struct CodeEditor {
   press_time: Option<Instant>,
   undo: Vec<UndoState>,
   redo: Vec<UndoState>,
+  /// Bottom panel height while expanded.
+  panel_h: f32,
+  /// Bottom panel folded away (divider only).
+  collapsed: bool,
+  /// Divider resize in progress.
+  divider_drag: bool,
+  /// Divider resize anchor: press Y plus panel height at press.
+  divider_start: (f32, f32),
+  divider_moved: bool,
+  /// Fake CPU/MEM samples (0..100, one per second).
+  samples_cpu: Vec<f32>,
+  samples_mem: Vec<f32>,
+  /// Fake cargo log lines.
+  logs: Vec<String>,
+  /// Logs overlay bar plus model guard.
+  log_bar: Scrollbar,
+  log_model: (f32, f32),
+  /// Stick the logs to the bottom on new lines.
+  stick_logs: bool,
+  /// Fake tick counter and last tick time.
+  tick_count: u64,
+  last_tick: f64,
+  /// Last hover point for wheel routing.
+  last_hover: (f32, f32),
 }
 
 impl CodeEditor {
@@ -343,6 +402,20 @@ impl CodeEditor {
       press_time: None,
       undo: Vec::new(),
       redo: Vec::new(),
+      panel_h: PANEL_DEFAULT_H,
+      collapsed: false,
+      divider_drag: false,
+      divider_start: (0.0, 0.0),
+      divider_moved: false,
+      samples_cpu: Vec::new(),
+      samples_mem: Vec::new(),
+      logs: Vec::new(),
+      log_bar: Scrollbar::new(),
+      log_model: (-1.0, -1.0),
+      stick_logs: true,
+      tick_count: 0,
+      last_tick: 0.0,
+      last_hover: (-1.0, -1.0),
     }
   }
 
@@ -367,6 +440,45 @@ impl CodeEditor {
   pub fn set_focused(&mut self, focused: bool) {
     self.focused = focused;
     self.bar.set_focused(focused);
+    self.log_bar.set_focused(focused);
+  }
+
+  /// Panel state for tests and later wiring.
+  pub fn panel_height(&self) -> f32 {
+    self.panel_h
+  }
+
+  pub fn panel_collapsed(&self) -> bool {
+    self.collapsed
+  }
+
+  pub fn log_lines(&self) -> &[String] {
+    &self.logs
+  }
+
+  pub fn sample_count(&self) -> usize {
+    self.samples_cpu.len()
+  }
+
+  /// Zones inside the placed rect: code viewport, divider strip,
+  /// panel area, stats area (panel left) and logs area (panel
+  /// right). The panel area is empty while collapsed.
+  fn zones(&self) -> ((f32, f32, f32, f32), (f32, f32, f32, f32), (f32, f32, f32, f32), (f32, f32, f32, f32), (f32, f32, f32, f32)) {
+    let (rx, ry, rw, rh) = self.rect;
+    let panel_h = if self.collapsed { 0.0 } else { self.panel_h };
+    let code_h = (rh - PANEL_DIV_H - panel_h).max(40.0);
+    let code = (rx, ry, rw, code_h);
+    let divider = (rx, ry + code_h, rw, PANEL_DIV_H);
+    let panel = (rx, ry + code_h + PANEL_DIV_H, rw, panel_h);
+    let split = (rw * PANEL_STATS_SPLIT).max(0.0);
+    let stats = (rx, panel.1, split, panel_h);
+    let logs = (rx + split, panel.1, (rw - split).max(0.0), panel_h);
+    (code, divider, panel, stats, logs)
+  }
+
+  /// Code viewport height (the code scrollbar model uses this).
+  fn code_h(&self) -> f32 {
+    self.zones().0.3
   }
 
   /// Current scroll offset in logical px (`0.0` is the top).
@@ -394,19 +506,19 @@ impl CodeEditor {
     self.lines().len() as f32 * CODE_LINE_H
   }
 
-  /// True while the pointer is over the overlay bar (same generous
-  /// grab area the `Scrollbar` itself uses). Presses there drive the
-  /// bar and never reach the text underneath.
+  /// True while the pointer is over the code overlay bar (same
+  /// generous grab area the `Scrollbar` itself uses). Presses there
+  /// drive the bar and never reach the text underneath.
   fn over_bar(&self, x: f32, y: f32) -> bool {
-    if !self.bar.scrollable() || self.rect.2 <= 0.0 || self.rect.3 <= 0.0
-    {
+    let code = self.zones().0;
+    if !self.bar.scrollable() || code.2 <= 0.0 || code.3 <= 0.0 {
       return false;
     }
-    let bx = self.rect.0 + self.rect.2 - CODE_BAR_W;
+    let bx = code.0 + code.2 - CODE_BAR_W;
     x >= bx - 2.0
-      && x <= self.rect.0 + self.rect.2 + 2.0
-      && y >= self.rect.1
-      && y <= self.rect.1 + self.rect.3
+      && x <= code.0 + code.2 + 2.0
+      && y >= code.1
+      && y <= code.1 + code.3
   }
 
   /// Sync the bar model with the content: `set_content` flashes the
@@ -414,37 +526,39 @@ impl CodeEditor {
   /// would keep the bar awake forever). The bar stays the single
   /// source of truth for the offset.
   fn sync_bar(&mut self, fonts: &mut FontSystem) {
-    let model = (self.content_h(), self.rect.3);
+    let code = self.zones().0;
+    let model = (self.content_h(), code.3);
     if model != self.last_model {
       self.last_model = model;
       self.bar.set_content(model.0, model.1);
     }
-    let bw = CODE_BAR_W.min(self.rect.2).max(0.0);
+    let bw = CODE_BAR_W.min(code.2).max(0.0);
     self.bar.set_rect(
-      self.rect.0 + (self.rect.2 - bw).max(0.0),
-      self.rect.1,
+      code.0 + (code.2 - bw).max(0.0),
+      code.1,
       bw,
-      self.rect.3,
+      code.3,
     );
-    let content_h = model.0.max(self.rect.3);
+    let content_h = model.0.max(code.3);
     self.rows.place(
       fonts,
-      self.rect.0,
-      self.rect.1 - self.bar.offset(),
-      self.rect.2,
+      code.0,
+      code.1 - self.bar.offset(),
+      code.2,
       content_h,
     );
   }
 
-  /// Keep the caret visible inside the viewport.
+  /// Keep the caret visible inside the code viewport.
   fn track_caret(&mut self) {
     let (line, _) = self.line_col();
     let top = line as f32 * CODE_LINE_H;
     let offset = self.bar.offset();
+    let visible = self.code_h();
     if top - offset < 0.0 {
       self.bar.set_offset(top.max(0.0));
-    } else if top + CODE_LINE_H - offset > self.rect.3 {
-      self.bar.set_offset((top + CODE_LINE_H - self.rect.3).max(0.0));
+    } else if top + CODE_LINE_H - offset > visible {
+      self.bar.set_offset((top + CODE_LINE_H - visible).max(0.0));
     }
   }
 
@@ -777,18 +891,26 @@ impl CodeEditor {
     self.track_caret();
   }
 
-  /// Press handling: presses over the overlay bar drive the bar
-  /// and never reach the text; clicks inside arm a focus plus caret
-  /// resolve on the next draw (caret mapping needs fonts); outside
-  /// unfocuses at once.
+  /// Press handling: presses over a scrollbar drive that bar and
+  /// never reach the text; presses on the divider arm a resize (a
+  /// tap toggles the panel like a sidebar); clicks inside the code
+  /// arm a focus plus caret resolve on the next draw (caret mapping
+  /// needs fonts); anywhere else unfocuses at once.
   pub fn press(&mut self, x: f64, y: f64) {
     self.bar.mouse_down(x, y);
+    self.log_bar.mouse_down(x, y);
     let (x, y) = (x as f32, y as f32);
-    let (rx, ry, rw, rh) = self.rect;
-    if self.over_bar(x, y) {
+    let (code, divider, _, _, logs) = self.zones();
+    if self.over_bar(x, y) || point_in(logs, x, y) {
       return;
     }
-    if x >= rx && x <= rx + rw && y >= ry && y <= ry + rh {
+    if point_in(divider, x, y) {
+      self.divider_drag = true;
+      self.divider_moved = false;
+      self.divider_start = (y, self.panel_h);
+      return;
+    }
+    if point_in(code, x, y) {
       self.selected = true;
       self.pressing = true;
       self.pending = Some((x, y));
@@ -848,6 +970,249 @@ impl CodeEditor {
     }
     true
   }
+
+  /// Base text color (AGENTS.md palette, no secondary colors).
+  fn ink(&self) -> Color {
+    if self.dark {
+      Color::from_rgb8(0xd8, 0xd9, 0xd9)
+    } else {
+      Color::from_rgb8(0x27, 0x27, 0x27)
+    }
+  }
+
+  fn dim(&self) -> Color {
+    if self.dark {
+      TEXTFIELD_PLACEHOLDER_DARK
+    } else {
+      TEXTFIELD_PLACEHOLDER_LIGHT
+    }
+  }
+
+  fn rule(&self) -> Color {
+    if self.dark {
+      DIVIDER_DARK
+    } else {
+      DIVIDER_LIGHT
+    }
+  }
+
+  /// Fake performance sample in 0..100 (deterministic drift plus
+  /// jitter from the tick counter, no IO).
+  fn fake_sample(tick: u64, phase: f32) -> f32 {
+    let t = tick as f32;
+    let jitter = ((tick.wrapping_mul(37)) % 13) as f32 - 6.0;
+    (48.0 + 26.0 * (t * 0.5 + phase).sin() + jitter).clamp(4.0, 98.0)
+  }
+
+  /// One fake cargo log line per tick (build loop, example only).
+  fn fake_log_line(tick: u64) -> String {
+    match tick % 6 {
+      0 => "   Compiling xcode v27.0.0".to_string(),
+      1 => "   Compiling sdk v27.0.0 (/Library/System/sdk)".to_string(),
+      2 => "    Finished `dev` profile [unoptimized + debuginfo]".to_string(),
+      3 => "     Running `target/debug/xcode`".to_string(),
+      4 => "warning: unused variable `offset`".to_string(),
+      _ => "    Finished in 1.24s".to_string(),
+    }
+  }
+
+  /// Advance fake stats and logs. Called with the frame time by the
+  /// app (see `EditorUi`); appends one sample plus one log line per
+  /// elapsed second. Edits stay in memory only, nothing runs.
+  pub fn tick(&mut self, now_secs: f64) {
+    if now_secs - self.last_tick < TICK_SECONDS {
+      return;
+    }
+    self.last_tick = now_secs;
+    self.tick_count += 1;
+    self.samples_cpu.push(Self::fake_sample(self.tick_count, 0.0));
+    self.samples_mem.push(Self::fake_sample(self.tick_count, 2.1));
+    if self.samples_cpu.len() > STATS_CAP {
+      self.samples_cpu.remove(0);
+    }
+    if self.samples_mem.len() > STATS_CAP {
+      self.samples_mem.remove(0);
+    }
+    self.logs.push(Self::fake_log_line(self.tick_count));
+    if self.logs.len() > LOGS_CAP {
+      let drop = self.logs.len() - LOGS_CAP;
+      self.logs.drain(..drop);
+    }
+    // Stay stuck to the bottom while the user never scrolled up.
+    if self.stick_logs {
+      let list_h = self.zones().4.3 - PANEL_HEADER_H;
+      let max = (self.logs.len() as f32 * LOG_LINE_H - list_h).max(0.0);
+      self.log_bar.set_offset(max);
+    }
+  }
+
+  /// Sync the logs bar model (guarded like the code bar so the
+  /// overlay keeps fading out while idle).
+  fn sync_log_bar(&mut self) {
+    let logs = self.zones().4;
+    let list_h = (logs.3 - PANEL_HEADER_H).max(0.0);
+    let model = (self.logs.len() as f32 * LOG_LINE_H, list_h);
+    if model != self.log_model {
+      self.log_model = model;
+      self.log_bar.set_content(model.0, model.1);
+    }
+    let bw = CODE_BAR_W.min(logs.2).max(0.0);
+    self.log_bar.set_rect(
+      logs.0 + (logs.2 - bw).max(0.0),
+      logs.1 + PANEL_HEADER_H,
+      bw,
+      list_h,
+    );
+  }
+
+  fn draw_label(
+    scene: &mut Scene,
+    fonts: &mut FontSystem,
+    text: &str,
+    size: f32,
+    color: Color,
+    x: f32,
+    y: f32,
+  ) {
+    let layout = fonts.layout_text(text, size, color, None);
+    draw_layout(scene, &layout, x, y, fonts.scale);
+  }
+
+  /// One sparkline polyline for `samples` (oldest left, newest
+  /// right) in custom Vello paths (user-approved: TontooUI ships no
+  /// line chart, only gauges).
+  fn draw_spark(
+    scene: &mut Scene,
+    scale: f32,
+    samples: &[f32],
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    color: Color,
+  ) {
+    if w <= 0.0 || h <= 0.0 || samples.len() < 2 {
+      return;
+    }
+    let step = 4.0;
+    let max_n = ((w / step) as usize).max(2);
+    let skip = samples.len().saturating_sub(max_n);
+    let data = &samples[skip..];
+    let mut path = BezPath::new();
+    for (i, v) in data.iter().enumerate() {
+      let px = x + i as f32 * step;
+      let py = y + h - (v.clamp(0.0, 100.0) / 100.0) * h;
+      if i == 0 {
+        path.move_to((px as f64, py as f64));
+      } else {
+        path.line_to((px as f64, py as f64));
+      }
+    }
+    let mut stroke = Stroke::new(1.5 * scale as f64);
+    stroke.start_cap = Cap::Round;
+    stroke.end_cap = Cap::Round;
+    stroke.join = Join::Round;
+    scene.stroke(&stroke, Affine::IDENTITY, &Brush::Solid(color), None, &path);
+  }
+
+  /// Left panel stats: `Performance` header plus CPU and MEM labels
+  /// with sparklines (fake in-memory data, example only).
+  fn draw_stats(
+    &self,
+    scene: &mut Scene,
+    fonts: &mut FontSystem,
+    stats: (f32, f32, f32, f32),
+  ) {
+    if stats.2 <= 0.0 || stats.3 <= 0.0 {
+      return;
+    }
+    let pad = 10.0;
+    let x = stats.0 + pad;
+    let w = (stats.2 - pad * 2.0).max(0.0);
+    Self::draw_label(
+      scene,
+      fonts,
+      "Performance",
+      PANEL_LABEL_SIZE,
+      self.dim(),
+      x,
+      stats.1 + 4.0,
+    );
+    let top = stats.1 + PANEL_HEADER_H;
+    let block_h = ((stats.3 - PANEL_HEADER_H) / 2.0).max(0.0);
+    let scale = fonts.scale;
+    for (row, title, samples, color) in [
+      (0, "CPU", &self.samples_cpu, self.accent),
+      (1, "MEM", &self.samples_mem, self.ink()),
+    ] {
+      let by = top + row as f32 * block_h;
+      let value = samples.last().copied().unwrap_or(0.0).round() as i64;
+      Self::draw_label(
+        scene,
+        fonts,
+        &format!("{title} {value}%"),
+        PANEL_LABEL_SIZE,
+        self.dim(),
+        x,
+        by + 2.0,
+      );
+      let gy = by + 16.0;
+      let gh = (block_h - 18.0).max(0.0);
+      Self::draw_spark(scene, scale, samples, x, gy, w, gh, color);
+    }
+  }
+
+  /// Right panel logs: `Logs` header plus the fake cargo lines on
+  /// the standard overlay bar (wheel, thumb drag, track jump,
+  /// bottom stick while the user never scrolled up).
+  fn draw_logs(
+    &mut self,
+    scene: &mut Scene,
+    fonts: &mut FontSystem,
+    logs: (f32, f32, f32, f32),
+  ) {
+    if logs.2 <= 0.0 || logs.3 <= 0.0 {
+      return;
+    }
+    let pad = 10.0;
+    let x = logs.0 + pad;
+    Self::draw_label(
+      scene,
+      fonts,
+      "Logs",
+      PANEL_LABEL_SIZE,
+      self.dim(),
+      x,
+      logs.1 + 4.0,
+    );
+    let list_y = logs.1 + PANEL_HEADER_H;
+    let list_h = (logs.3 - PANEL_HEADER_H).max(0.0);
+    let list_w = (logs.2 - pad).max(0.0);
+    if list_w <= 0.0 || list_h <= 0.0 {
+      return;
+    }
+    self.sync_log_bar();
+    let scale = fonts.scale as f64;
+    let px = |v: f32| v as f64 * scale;
+    let offset = self.log_bar.offset();
+    let clip = Rect::new(px(x), px(list_y), px(x + list_w), px(list_y + list_h));
+    scene.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &clip);
+    let first = (offset / LOG_LINE_H) as usize;
+    let mut y = list_y - (offset % LOG_LINE_H);
+    for line in self.logs.iter().skip(first) {
+      if y > list_y + list_h {
+        break;
+      }
+      let color = if line.contains("warning") {
+        self.accent
+      } else {
+        self.ink()
+      };
+      Self::draw_label(scene, fonts, line, LOG_FONT_SIZE, color, x, y);
+      y += LOG_LINE_H;
+    }
+    scene.pop_layer();
+  }
 }
 
 impl View for CodeEditor {
@@ -866,6 +1231,7 @@ impl View for CodeEditor {
   ) {
     self.rect = (x, y, width, height);
     self.sync_bar(fonts);
+    self.sync_log_bar();
   }
 
   fn draw(
@@ -903,11 +1269,11 @@ impl View for CodeEditor {
     }
     let scale = fonts.scale as f64;
     let px = |v: f32| v as f64 * scale;
-    let (rx, ry, rw, rh) = self.rect;
-    if rw <= 0.0 || rh <= 0.0 {
+    let (code, divider, panel, stats, logs) = self.zones();
+    if code.2 <= 0.0 || code.3 <= 0.0 {
       return;
     }
-    let clip = Rect::new(px(rx), px(ry), px(rx + rw), px(ry + rh));
+    let clip = Rect::new(px(code.0), px(code.1), px(code.0 + code.2), px(code.1 + code.3));
     scene.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &clip);
     self.rows.draw(scene, fonts, images);
     // Selection wash, segmented per line.
@@ -934,9 +1300,7 @@ impl View for CodeEditor {
           let x1 = rich_advance(fonts, line, dark, hi - start);
           let cy =
             self.rect.1 + index as f32 * CODE_LINE_H - offset;
-          if cy + CODE_LINE_H >= self.rect.1
-            && cy <= self.rect.1 + self.rect.3
-          {
+          if cy + CODE_LINE_H >= code.1 && cy <= code.1 + code.3 {
             let cx = self.rect.0 + CODE_GUTTER_W + CODE_GAP;
             scene.fill(
               Fill::NonZero,
@@ -967,9 +1331,7 @@ impl View for CodeEditor {
         + rich_advance(fonts, &current, dark, upto);
       let cy =
         self.rect.1 + line as f32 * CODE_LINE_H - self.bar.offset();
-      if cy + CODE_LINE_H >= self.rect.1
-        && cy <= self.rect.1 + self.rect.3
-      {
+      if cy + CODE_LINE_H >= code.1 && cy <= code.1 + code.3 {
         let accent = if self.focused {
           self.accent
         } else {
@@ -990,7 +1352,33 @@ impl View for CodeEditor {
       }
     }
     scene.pop_layer();
+    // Divider rule across the strip.
+    let rule = self.rule();
+    let dy = divider.1 + divider.3 / 2.0;
+    scene.fill(
+      Fill::NonZero,
+      Affine::IDENTITY,
+      &Brush::Solid(rule),
+      None,
+      &Rect::new(px(divider.0), px(dy), px(divider.0 + divider.2), px(dy + 1.0)),
+    );
+    // Bottom panel: vertical split plus stats left, logs right.
+    if !self.collapsed && panel.3 > 0.0 {
+      let sx = stats.0 + stats.2;
+      scene.fill(
+        Fill::NonZero,
+        Affine::IDENTITY,
+        &Brush::Solid(rule),
+        None,
+        &Rect::new(px(sx), px(panel.1), px(sx + 1.0), px(panel.1 + panel.3)),
+      );
+      self.draw_stats(scene, fonts, stats);
+      self.draw_logs(scene, fonts, logs);
+    }
     self.bar.draw(scene, fonts, images);
+    if !self.collapsed {
+      self.log_bar.draw(scene, fonts, images);
+    }
   }
 
   fn mouse_down(&mut self, x: f64, y: f64) {
@@ -999,13 +1387,37 @@ impl View for CodeEditor {
 
   fn mouse_up(&mut self, x: f64, y: f64) {
     self.bar.mouse_up(x, y);
+    self.log_bar.mouse_up(x, y);
+    // Tap on the divider folds the panel away like a sidebar; a
+    // drag resizes it instead (see `set_hover`).
+    if self.divider_drag {
+      if !self.divider_moved {
+        self.collapsed = !self.collapsed;
+      }
+      self.divider_drag = false;
+      self.divider_moved = false;
+    }
     self.pressing = false;
     self.pending = None;
     self.drag = None;
   }
 
   fn set_hover(&mut self, x: f32, y: f32) {
+    self.last_hover = (x, y);
     self.bar.mouse_move(x as f64, y as f64);
+    self.log_bar.mouse_move(x as f64, y as f64);
+    if self.divider_drag {
+      let dy = self.divider_start.0 - y;
+      if dy.abs() > PANEL_DRAG_SLOP {
+        self.divider_moved = true;
+      }
+      if self.divider_moved {
+        self.collapsed = false;
+        self.panel_h =
+          (self.divider_start.1 + dy).clamp(PANEL_MIN_H, PANEL_MAX_H);
+      }
+      return;
+    }
     let (rx, ry, rw, rh) = self.rect;
     self.hovered = x >= rx && x <= rx + rw && y >= ry && y <= ry + rh;
     if self.pressing && self.selected {
@@ -1022,7 +1434,18 @@ impl View for CodeEditor {
   }
 
   fn mouse_wheel(&mut self, dx: f64, dy: f64) {
-    self.scroll(dx, dy);
+    // Route by last hover: logs zone drives the logs bar (and
+    // leaves the bottom stick once the user scrolls up), anywhere
+    // else drives the code bar.
+    let (_, _, _, _, logs) = self.zones();
+    let (hx, hy) = self.last_hover;
+    if !self.collapsed && point_in(logs, hx, hy) {
+      self.log_bar.mouse_wheel(dx, dy);
+      self.stick_logs =
+        self.log_bar.offset() >= self.log_bar.max_offset() - 1.0;
+    } else {
+      self.bar.mouse_wheel(dx, dy);
+    }
   }
 
   fn as_any_mut(&mut self) -> &mut dyn Any {
@@ -1157,6 +1580,67 @@ mod tests {
     ed.bar.set_content(ed.content_h(), 200.0);
     assert!(!ed.scrollable());
     assert_eq!(ed.max_offset(), 0.0);
+  }
+
+  #[test]
+  fn panel_starts_expanded() {
+    let ed = CodeEditor::new("hi".to_string());
+    assert!(!ed.panel_collapsed());
+    assert_eq!(ed.panel_height(), PANEL_DEFAULT_H);
+  }
+
+  #[test]
+  fn divider_click_collapses_panel() {
+    let mut ed = CodeEditor::new("hi".to_string());
+    ed.rect = (0.0, 0.0, 400.0, 600.0);
+    // Expanded: code 410px, divider 410..420.
+    ed.press(200.0, 415.0);
+    assert!(ed.divider_drag);
+    <CodeEditor as View>::mouse_up(&mut ed, 200.0, 415.0);
+    assert!(ed.panel_collapsed());
+    // Collapsed: code 590px, divider 590..600; tap reopens.
+    ed.press(200.0, 595.0);
+    <CodeEditor as View>::mouse_up(&mut ed, 200.0, 595.0);
+    assert!(!ed.panel_collapsed());
+  }
+
+  #[test]
+  fn divider_drag_resizes_panel() {
+    let mut ed = CodeEditor::new("hi".to_string());
+    ed.rect = (0.0, 0.0, 400.0, 600.0);
+    ed.press(200.0, 415.0);
+    <CodeEditor as View>::set_hover(&mut ed, 200.0, 375.0);
+    assert!((ed.panel_height() - 220.0).abs() < 0.01);
+    <CodeEditor as View>::mouse_up(&mut ed, 200.0, 375.0);
+    assert!(!ed.panel_collapsed());
+  }
+
+  #[test]
+  fn tick_samples_and_logs_each_second() {
+    let mut ed = CodeEditor::new("hi".to_string());
+    ed.rect = (0.0, 0.0, 400.0, 600.0);
+    ed.tick(0.0);
+    assert_eq!(ed.sample_count(), 0);
+    assert!(ed.log_lines().is_empty());
+    ed.tick(1.0);
+    assert_eq!(ed.sample_count(), 1);
+    assert_eq!(ed.log_lines().len(), 1);
+    ed.tick(1.5);
+    assert_eq!(ed.sample_count(), 1);
+    ed.tick(2.0);
+    assert_eq!(ed.sample_count(), 2);
+    assert_eq!(ed.log_lines().len(), 2);
+  }
+
+  #[test]
+  fn logs_and_samples_cap() {
+    let mut ed = CodeEditor::new("hi".to_string());
+    ed.rect = (0.0, 0.0, 400.0, 600.0);
+    for i in 1..=400u64 {
+      ed.tick(i as f64);
+    }
+    assert_eq!(ed.log_lines().len(), LOGS_CAP);
+    assert_eq!(ed.sample_count(), STATS_CAP);
   }
 
   #[test]

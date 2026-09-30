@@ -53,6 +53,7 @@ pages: narrow windows squeeze the code, wide windows use everything.
 | `navigator` | `SidebarItem` | Project root plus `Assets`, `ContentView`, `Info` and file rows, preselected on the file row; `collapsible(false)` (never collapses, no collapse button), search hidden (`search_field(false)`), toggle pill hidden; mouse reaches the element natively (hover, selection, wheel, resize cursor); `set_item_text(None)` clears the element's white default so labels follow the theme (light `#272727`) |
 | `search` | `SearchField` | Functionless capsule (`ed.search`) pinned to the sidebar bottom: 28px tall, full column width even while resizing; takes focus and typing, never searches |
 | `editor` | `CodeEditor` pages | Editable 40-line Rust hello example through the DocumentKit Rust tokenizer (`highlight` → `Span`s: bold keywords, underlined strings, dimmed italic comments, gaps plain; per line, example code uses no multi-line constructs); gray `Footnote` gutter numbers share the code text size so they stay glued to their lines; spans rebuild on every edit and on theme text change; click inside focuses with a caret, drag selects, double-click selects the word, typing replaces the highlight, `Backspace` deletes, `Enter` splits, arrows move (`Shift` extends),   `ESC` unfocuses, `Ctrl+A/C/X/V/Z/Y` selects all, copies, cuts, pastes, undoes and redoes through an in-memory clipboard; caret, click mapping and the selection wash measure through the same rich monospace DocumentKit layout the code rows render with (bold runs included), so the highlight hugs the letters exactly; the wheel scrolls vertically with caret tracking so the caret stays visible; edits stay in memory only. No breadcrumb, no status bar (removed) |
+| `bottom` | divider + `CodeEditor` panel | Bottom area below the code with a drag divider: click collapses or expands it like a sidebar, dragging resizes it between 100px and 420px (180px default); left `Performance` stats with custom CPU and MEM sparklines plus live values sampling every 1s (fake in-memory data, custom Vello paths, user-approved); right `Logs` with a fake cargo build loop growing every 1s (capped at 300 lines) on the standard overlay `Scrollbar` with wheel, thumb drag, track jump and bottom stick; all example only, nothing runs |
 | `status` | page `HStack` | `Filter` (`ed.filter`), `Spacer`, `Line: 1  Col: 1` (`ed.status`) |
 
 ```rust
@@ -73,12 +74,21 @@ pub fn file_stem(display_name: &str) -> String
 - `CodeEditor` is a custom Xcode element (user-approved: TontooUI has
   no code editor with live highlight, only plain `TextEditor`): it
   reuses TontooUI `BasicText` plus `FormattedText` rows with
-  DocumentKit spans, a caret rect and a selection wash, following
-  normal text field behavior (click to focus, drag or `Shift` plus
-  arrows to select, double-click for word select, I-beam hover,
-  typing, `Backspace`, `Enter`, arrows, `ESC` to unfocus,
-  `Ctrl+A/C/X/V/Z/Y` for select, clipboard, undo and redo with an
-  in-memory clipboard capped at 100 undo steps).
+  DocumentKit spans, a caret rect, a selection wash and the standard
+  overlay `Scrollbar`, following normal text field behavior (click to
+  focus, drag or `Shift` plus arrows to select, double-click for word
+  select, I-beam hover, typing, `Backspace`, `Enter`, arrows, `ESC`
+  to unfocus, `Ctrl+A/C/X/V/Z/Y` for select, clipboard, undo and redo
+  with an in-memory clipboard capped at 100 undo steps).
+- Below the code sits a bottom panel with a drag divider: click
+  collapses or expands it like a sidebar, dragging resizes it
+  (100px..420px, 180px default). The left `Performance` stats draw
+  custom CPU and MEM sparklines (Vello paths, user-approved custom
+  drawing) sampling fake in-memory values every 1s; the right `Logs`
+  shows a fake cargo build loop growing every 1s (capped at 300
+  lines) on its own standard `Scrollbar` sticking to the bottom.
+  `EditorUi` ticks the active code page with the frame time; all
+  example only, nothing runs.
 - `EditorUi` owns its `ThemeWatcher`; text and keys reach the active
   code page through `sidebar.page_text` and `sidebar.page_key` when
   the search field is not selected; the cursor shows I-beam over
