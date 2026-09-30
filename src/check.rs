@@ -184,20 +184,6 @@ fn push_line(
   }
 }
 
-/// Collect diagnostics from cargo output lines, own-crate messages
-/// first. Pure over lines (cancellation stays in the worker loop).
-pub fn collect_diagnostics<I: Iterator<Item = String>>(
-  lines: I,
-) -> Vec<CheckDiagnostic> {
-  let mut relative = Vec::new();
-  let mut other = Vec::new();
-  for line in lines {
-    push_line(&mut relative, &mut other, &line);
-  }
-  relative.extend(other);
-  relative
-}
-
 /// Short row title for a diagnostic (`code` appended when present,
 /// clamped to `MAX_TITLE_CHARS`).
 pub fn diagnostic_title(diag: &CheckDiagnostic) -> String {
@@ -368,7 +354,13 @@ mod tests {
     }
     lines.push(own_error(8));
     lines.push(own_error(19));
-    let diags = collect_diagnostics(lines.into_iter());
+    let mut relative = Vec::new();
+    let mut other = Vec::new();
+    for line in &lines {
+      push_line(&mut relative, &mut other, line);
+    }
+    relative.extend(other);
+    let diags = relative;
     // Dependency bucket caps at 200, both own errors survive on top.
     assert_eq!(diags.len(), MAX_COLLECT_OTHER + 2);
     assert_eq!(diags[0].file, "src/app.rs");

@@ -93,4 +93,5 @@ See [StartPage.md](StartPage.md) for details.
 - 2026-09-30: Real editor files (per-row disk content via `load_file_text`, folders and binary files read-only with `ed.binary`, 400ms auto-save after typing stops plus flush on close, still no build or run).
 - 2026-09-30: Background `cargo check` 2.5s after typing stops plus once on project open (single cancellable job, `Indexing Files...` glass pill, real errors with What plus file and line in code gutters and the warnings tab, Foundation JSON without serde, Run/Stop stays dead).
 - 2026-09-30: Live sidebar search (every case-insensitive content hit as `file:line` plus snippet with a plain file icon, click or Enter jumps to line and column, warnings tab filters issues, ESC clears, `search.no_results` placeholder).
+- 2026-09-30: Working back/forward chevrons (two round pills stepping through the visit history, greyed out at the history ends).
 - 2026-09-30: Nested outline file tree (`BasicOutlineGroup`, trailing chevrons, type icons, remembered state, animated) replacing the flat rows; outline clicks land on flat pages, warning jumps expand ancestors.

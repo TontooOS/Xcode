@@ -337,6 +337,13 @@ struct ActiveCheck {
   child: Arc<Mutex<Option<Child>>>,
 }
 
+/// History navigation request from the chevron pills.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NavDir {
+  Back,
+  Fwd,
+}
+
 /// Max content search hits (the results list stays usable).
 pub const MAX_SEARCH_HITS: usize = 200;
 /// Max chars of the matched code line shown per search row.
@@ -374,9 +381,17 @@ pub struct EditorUi {
   computer: FileImage,
   /// Glass pill behind the device menu (the actual toolbar look).
   menu_glass: BasicToolbar,
-  /// Dead back/forward chevrons at the content left.
-  chev: BasicToolbar,
-  /// Performance pill at the content right
+  /// Back/forward chevron pills at the content left (file visit
+  /// history, round circles, greyed out at the history ends).
+  chev_back: BasicToolbar,
+  chev_fwd: BasicToolbar,
+  /// Pending history navigation from the chevron pills.
+  nav_request: Rc<Cell<Option<NavDir>>>,
+  /// File visit history (sidebar row indices, capped).
+  back_stack: Vec<usize>,
+  forward_stack: Vec<usize>,
+  /// Last recorded selection (external changes push history).
+  history_top: usize,  /// Performance pill at the content right
   /// (`chart.line.uptrend.xyaxis`, round circle): toggles the bottom
   /// panel open or closed on every page.
   inspector: BasicToolbar,
@@ -599,8 +614,7 @@ impl EditorUi {
       lang::t("menu.export"),
     ];
     let code_pages = pages;
-    let mut sidebar = Sidebar::new(items);
-    for page in code_pages {
+    let mut sidebar = Sidebar::new(items);    for page in code_pages {
       sidebar = sidebar.page(page);
     }
     sidebar = sidebar
@@ -608,8 +622,8 @@ impl EditorUi {
       .toggle_button(false)
       .collapsible(false);
     // No content title (neither scheme nor item label): the topbar
-    // holds chevrons left, the device menu center and the collapse
-    // pill right instead.
+    // holds history chevrons left, the device menu center and the
+    // performance pill right instead.
     sidebar.set_title(String::new());
     sidebar.select(select);
     // Compact rows for the file list (folders and files alike).
@@ -651,6 +665,8 @@ impl EditorUi {
       BasicToolbar::from_items(vec![ToolbarItem::icon("chart.line.uptrend.xyaxis")])
         .round(true)
         .on_action(move |_| panel_toggle.set(!panel_toggle.get()));
+    // History navigation requests from the chevron pills.
+    let nav_request = Rc::new(Cell::new(None));
     Self {
       sidebar,
       search: SearchField::new(lang::t("ed.search")),
@@ -687,11 +703,22 @@ impl EditorUi {
       device_labels,
       device_sel,
       menu_glass: BasicToolbar::new(),
-      chev: BasicToolbar::from_items(vec![
-        ToolbarItem::icon("chevron.left"),
-        ToolbarItem::divider(),
-        ToolbarItem::icon("chevron.right"),
-      ]),
+      chev_back: BasicToolbar::from_items(vec![ToolbarItem::icon("chevron.left")])
+        .round(true)
+        .on_action({
+          let request = nav_request.clone();
+          move |_| request.set(Some(NavDir::Back))
+        }),
+      chev_fwd: BasicToolbar::from_items(vec![ToolbarItem::icon("chevron.right")])
+        .round(true)
+        .on_action({
+          let request = nav_request.clone();
+          move |_| request.set(Some(NavDir::Fwd))
+        }),
+      nav_request,
+      back_stack: Vec::new(),
+      forward_stack: Vec::new(),
+      history_top: select,
       inspector,
       panel_open,
       last_panel_open: Cell::new(false),
@@ -921,9 +948,76 @@ impl EditorUi {
     self.apply_panel_open(open);
   }
 
-  /// Jump to an example issue: back to the `Files` tab, select its
-  /// file and move the caret to its line. Runs at once on press so
-  /// the content never flashes the wrong file.
+  /// True while stepping back through visited files is possible.
+  pub fn can_go_back(&self) -> bool {
+    !self.back_stack.is_empty()
+  }
+
+  /// True while stepping forward through visited files is possible.
+  pub fn can_go_forward(&self) -> bool {
+    !self.forward_stack.is_empty()
+  }
+
+  /// Record an external file selection into the visit history
+  /// (called every frame): a new file pushes the previous one back
+  /// and drops the forward trail.
+  fn record_selection(&mut self) {
+    let selected = self.sidebar.selected_index();
+    if selected != self.history_top {
+      self.back_stack.push(self.history_top);
+      if self.back_stack.len() > 100 {
+        self.back_stack.remove(0);
+      }
+      self.forward_stack.clear();
+      self.history_top = selected;
+    }
+  }
+
+  /// Select a file with tree sync, without touching the history
+  /// (history navigation drives this itself).
+  fn select_file_synced(&mut self, index: usize) {
+    if index >= self.page_total {
+      return;
+    }
+    if let Some(path) = self.tree_paths.get(index).cloned() {
+      for depth in 1..path.len() {
+        self.nav_tree.set_expanded(&path[..depth], true);
+      }
+      self.nav_tree.select(path);
+    }
+    self.sidebar.select(index);
+    self.history_top = index;
+  }
+
+  /// Step back to the previously visited file.
+  pub fn go_back(&mut self) {
+    if let Some(previous) = self.back_stack.pop() {
+      self.forward_stack.push(self.history_top);
+      self.select_file_synced(previous);
+    }
+  }
+
+  /// Step forward to the file left by going back.
+  pub fn go_forward(&mut self) {
+    if let Some(next) = self.forward_stack.pop() {
+      self.back_stack.push(self.history_top);
+      self.select_file_synced(next);
+    }
+  }
+
+  /// Apply a pending chevron pill request, if any.
+  fn poll_nav_request(&mut self) {
+    if let Some(direction) = self.nav_request.take() {
+      match direction {
+        NavDir::Back => self.go_back(),
+        NavDir::Fwd => self.go_forward(),
+      }
+    }
+  }
+
+  /// Jump to an issue: select its file and move the caret to its
+  /// line. Stays on the current tab (only the editor content moves).
+  /// Runs at once on press so the content never flashes the wrong file.
   pub(crate) fn jump_to_issue(&mut self, index: usize) {
     let Some(item) = self.warn_items.get(index) else {
       return;
@@ -933,8 +1027,6 @@ impl EditorUi {
       return;
     }
     self.selected_warn = index;
-    self.nav_tab.set(0);
-    self.nav_tabs.set_selected(0);
     // Expand the ancestor folders so the jumped-to row is visible.
     if let Some(path) = self.tree_paths.get(file).cloned() {
       for depth in 1..path.len() {
@@ -1164,8 +1256,12 @@ impl EditorUi {
     self.device.set_focused(focused);
     self.menu_glass.set_theme(theme.mode, theme.glass);
     self.menu_glass.set_focused(focused);
-    self.chev.set_theme(theme.mode, theme.glass);
-    self.chev.set_focused(focused);
+    self.chev_back.set_theme(theme.mode, theme.glass);
+    self.chev_back.set_focused(focused);
+    self.chev_back.set_disabled(!self.can_go_back());
+    self.chev_fwd.set_theme(theme.mode, theme.glass);
+    self.chev_fwd.set_focused(focused);
+    self.chev_fwd.set_disabled(!self.can_go_forward());
     self.inspector.set_theme(theme.mode, theme.glass);
     self.inspector.set_focused(focused);
     self.check_glass.set_theme(theme.mode, theme.glass);
@@ -1279,8 +1375,11 @@ impl EditorUi {
       self.apply_panel_open(open);
     }
     // Outline selection lands on the flat page (same frame, so the
-    // content never flashes the wrong file).
+    // content never flashes the wrong file). External selection
+    // changes feed the visit history, then chevron requests navigate.
     self.poll_tree_select();
+    self.record_selection();
+    self.poll_nav_request();
 
     // No titlebar: the sidebar owns the decoration (traffic lights
     // live in it) and fills the whole viewport.
@@ -1394,7 +1493,8 @@ impl EditorUi {
     // so icon, text and chevron sit centered inside. The button
     // width derives from the button text only, not the widest
     // dropdown row, and the menu stays vertically centered in the
-    // pill. Dead chevron pair at the content left.
+    // pill. Two round chevron pills step through the visit history
+    // at the content left (greyed out at the history ends).
     self.device.set_viewport(viewport.x, viewport.y, viewport.width, viewport.height);
     let (_, menu_h) = self.device.measure(fonts);
     let label = self.device.button_text().to_string();
@@ -1426,9 +1526,18 @@ impl EditorUi {
     self.menu_glass.draw(scene, fonts, images);
     self.device.place(fonts, menu_x, menu_y, menu_w, menu_h);
     self.device.draw(scene, fonts, images);
-    let (chev_w, _) = self.chev.measure(fonts);
-    self.chev.place(fonts, content_x + SEARCH_PAD, viewport.y + 14.0, chev_w, 36.0);
-    self.chev.draw(scene, fonts, images);
+    let (back_w, _) = self.chev_back.measure(fonts);
+    self.chev_back.place(fonts, content_x + SEARCH_PAD, viewport.y + 14.0, back_w, 36.0);
+    self.chev_back.draw(scene, fonts, images);
+    let (fwd_w, _) = self.chev_fwd.measure(fonts);
+    self.chev_fwd.place(
+      fonts,
+      content_x + SEARCH_PAD + back_w + 8.0,
+      viewport.y + 14.0,
+      fwd_w,
+      36.0,
+    );
+    self.chev_fwd.draw(scene, fonts, images);
     // Check status pill left of the performance pill: a glass body
     // with the `check.indexing` label, only while a check runs.
     let (insp_w, _) = self.inspector.measure(fonts);
@@ -1515,7 +1624,8 @@ impl EditorUi {
     self.sidebar.set_hover(x, y);
     self.run_stop.mouse_move(x, y);
     self.device.mouse_move(x as f64, y as f64);
-    self.chev.mouse_move(x, y);
+    self.chev_back.mouse_move(x, y);
+    self.chev_fwd.mouse_move(x, y);
     self.inspector.mouse_move(x, y);
     self.nav_tabs.mouse_move(x, y);
     self.refresh_code_ibeam();
@@ -1561,7 +1671,8 @@ impl EditorUi {
     self.search.mouse_down(x, y);
     self.run_stop.mouse_down(x, y);
     self.device.mouse_down(x, y);
-    self.chev.mouse_down(x, y);
+    self.chev_back.mouse_down(x, y);
+    self.chev_fwd.mouse_down(x, y);
     self.inspector.mouse_down(x, y);
     self.nav_tabs.mouse_down(x, y);
     if tree_hit && !resize {
@@ -1580,7 +1691,8 @@ impl EditorUi {
     // nothing, by design. The device menu keeps its example selection.
     self.run_stop.mouse_up(x, y);
     self.device.mouse_up(x, y);
-    self.chev.mouse_up(x, y);
+    self.chev_back.mouse_up(x, y);
+    self.chev_fwd.mouse_up(x, y);
     self.inspector.mouse_up(x, y);
     self.nav_tabs.mouse_up(x, y);
     self.nav_tree.mouse_up(x, y);
@@ -1661,7 +1773,8 @@ impl EditorUi {
     self.run_stop.set_focused(focused);
     self.device.set_focused(focused);
     self.menu_glass.set_focused(focused);
-    self.chev.set_focused(focused);
+    self.chev_back.set_focused(focused);
+    self.chev_fwd.set_focused(focused);
     self.inspector.set_focused(focused);
     self.check_glass.set_focused(focused);
     self.check_text.set_focused(focused);
@@ -1867,6 +1980,73 @@ mod tests {
         .expect("code page");
       assert!(ed.panel_collapsed());
     }
+  }
+
+  #[test]
+  fn history_records_external_selections() {
+    let code = example_code("testApp", "test", "arlo");
+    let mut ui = EditorUi::new("test", code);
+    assert_eq!(ui.history_top, FILE_INDEX);
+    assert!(!ui.can_go_back());
+    assert!(!ui.can_go_forward());
+    ui.sidebar.select(2);
+    ui.record_selection();
+    assert!(ui.can_go_back());
+    assert!(!ui.can_go_forward());
+    assert_eq!(ui.history_top, 2);
+    ui.sidebar.select(3);
+    ui.record_selection();
+    assert_eq!(ui.history_top, 3);
+    // Same selection never pushes twice.
+    ui.record_selection();
+    assert_eq!(ui.back_stack, vec![FILE_INDEX, 2]);
+  }
+
+  #[test]
+  fn go_back_forward_navigates_history() {
+    let code = example_code("testApp", "test", "arlo");
+    let mut ui = EditorUi::new("test", code);
+    ui.sidebar.select(1);
+    ui.record_selection();
+    ui.sidebar.select(2);
+    ui.record_selection();
+    ui.go_back();
+    assert_eq!(ui.sidebar.selected_index(), 1);
+    assert!(ui.can_go_back());
+    assert!(ui.can_go_forward());
+    ui.go_back();
+    assert_eq!(ui.sidebar.selected_index(), FILE_INDEX);
+    assert!(!ui.can_go_back());
+    assert!(ui.can_go_forward());
+    // Empty back stack is a no-op.
+    ui.go_back();
+    assert_eq!(ui.sidebar.selected_index(), FILE_INDEX);
+    ui.go_forward();
+    assert_eq!(ui.sidebar.selected_index(), 1);
+    ui.go_forward();
+    assert_eq!(ui.sidebar.selected_index(), 2);
+    assert!(!ui.can_go_forward());
+    // A new external selection drops the forward trail.
+    ui.go_back();
+    ui.sidebar.select(0);
+    ui.record_selection();
+    assert!(!ui.can_go_forward());
+    assert_eq!(ui.history_top, 0);
+  }
+
+  #[test]
+  fn chevron_request_navigates_on_poll() {
+    let code = example_code("testApp", "test", "arlo");
+    let mut ui = EditorUi::new("test", code);
+    ui.sidebar.select(1);
+    ui.record_selection();
+    ui.nav_request.set(Some(NavDir::Back));
+    ui.poll_nav_request();
+    assert_eq!(ui.sidebar.selected_index(), FILE_INDEX);
+    assert!(ui.nav_request.take().is_none());
+    ui.nav_request.set(Some(NavDir::Fwd));
+    ui.poll_nav_request();
+    assert_eq!(ui.sidebar.selected_index(), 1);
   }
 
   #[test]
@@ -2279,10 +2459,10 @@ mod tests {
     let code = example_code("testApp", "test", "arlo");
     let mut ui = EditorUi::new("test", code);
     // Pretend the warnings tab is open, then jump to the first
-    // issue (file 4, line 36).
+    // issue (file 4, line 36). The tab stays, only the editor moves.
     ui.nav_tab.set(1);
     ui.jump_to_issue(0);
-    assert_eq!(ui.nav_index(), 0);
+    assert_eq!(ui.nav_index(), 1);
     assert_eq!(ui.sidebar.selected_index(), 4);
     assert_eq!(ui.selected_warn, 0);
     let page = ui.sidebar.page_mut(4).expect("page");
@@ -2342,14 +2522,14 @@ mod tests {
     ui.nav_tree.collapse_all();
     ui.nav_tab.set(1);
     ui.jump_to_issue(0);
-    // Ancestors of the jumped-to file stand open again.
+    // Ancestors of the jumped-to file stand open again, the tab stays.
     let flat = ui.sidebar.selected_index();
     let path = ui.tree_paths[flat].clone();
     assert!(path.len() > 1);
     for depth in 1..path.len() {
       assert!(ui.nav_tree.is_expanded(&path[..depth]));
     }
-    assert_eq!(ui.nav_index(), 0);
+    assert_eq!(ui.nav_index(), 1);
     let _ = std::fs::remove_dir_all(&parent);
   }
 }
