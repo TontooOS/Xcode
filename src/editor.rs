@@ -15,8 +15,18 @@
 //! closes, short gap), then opens the 1100x700 editor fresh.
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
+use std::process::Child;
 use std::rc::Rc;
+use std::sync::{
+  Arc, Mutex,
+  atomic::{AtomicBool, Ordering},
+  mpsc::{Receiver, TryRecvError},
+};
+use std::time::Instant;
 
+use crate::check::{
+  CHECK_IDLE_DELAY, CheckResult, diagnostic_title, spawn_check,
+};
 use crate::code_editor::{CodeEditor, example_rust_code};
 use crate::project_files::{FileEntry, list_project_files, load_file_text};
 use crate::TontooUI::elements::{
@@ -315,6 +325,17 @@ fn png(file: &str) -> String {
   resource_path(file).to_string_lossy().to_string()
 }
 
+/// One running background `cargo check`: exactly one job exists at a
+/// time. A keystroke after the start revision cancels it (the child
+/// is killed) and a fresh job starts once typing stops again.
+struct ActiveCheck {
+  /// Content revision the job started on.
+  revision: u64,
+  rx: Receiver<CheckResult>,
+  cancel: Arc<AtomicBool>,
+  child: Arc<Mutex<Option<Child>>>,
+}
+
 pub struct EditorUi {
   sidebar: Sidebar,
   search: SearchField,
@@ -363,8 +384,23 @@ pub struct EditorUi {
   selected_warn: usize,
   /// Placed warning row rects for tap jumps.
   warn_rects: Vec<(f32, f32, f32, f32)>,
-  /// Navigator page count (one example page per row).
+  /// Navigator page count (one file page per row).
   page_total: usize,
+  /// Real filesystem path per row (empty for memory-only fallbacks).
+  file_paths: Vec<PathBuf>,
+  /// Project root for `cargo check` (`None` without a real project).
+  project_root: Option<PathBuf>,
+  /// Running background check, if any (never more than one).
+  check_job: Option<ActiveCheck>,
+  /// Latest spawned check generation (stale results are dropped).
+  check_generation: u64,
+  /// Content revision covered by the last applied check result.
+  content_at_check: u64,
+  /// Last content-changing keystroke (2.5s idle starts a check).
+  last_change: Option<Instant>,
+  /// Glass pill plus label showing `check.indexing` while a check runs.
+  check_glass: BasicToolbar,
+  check_text: BasicText,
   /// Nested outline tree for the Files tab (covers the flat rows).
   nav_tree: BasicOutlineGroup,
   /// Flat row index to outline path (entries order).
@@ -403,7 +439,7 @@ impl EditorUi {
       (true, lang::t("issue.unresolved_import"), 2, 1),
       (false, lang::t("issue.missing_docs"), 4, 22),
     ];
-    Self::from_entries(entries, code, FILE_INDEX, warn_specs)
+    Self::from_entries(None, entries, code, FILE_INDEX, warn_specs)
   }
 
   /// Open a real project root: every file row loads its real text
@@ -435,15 +471,18 @@ impl EditorUi {
       (true, lang::t("issue.unresolved_import"), secondary, 1),
       (false, lang::t("issue.missing_docs"), select, 22),
     ];
-    Ok(Self::from_entries(entries, code, select, warn_specs))
+    Ok(Self::from_entries(Some(root.to_path_buf()), entries, code, select, warn_specs))
   }
 
   /// Shared constructor from walker entries: flat sidebar rows plus
   /// one bound page per row (real file text, read-only folders and
   /// binary placeholders), warning names plus specs, and the nested
   /// outline tree mapping flat rows to outline paths. `code` is the
-  /// fallback text for memory-only rows without a real file.
+  /// fallback text for memory-only rows without a real file. `root`
+  /// enables the background `cargo check` (plus one initial run once
+  /// the window idles).
   fn from_entries(
+    root: Option<PathBuf>,
     entries: Vec<FileEntry>,
     code: String,
     select: usize,
@@ -466,8 +505,20 @@ impl EditorUi {
       .iter()
       .map(|entry| entry.label.trim().to_string())
       .collect::<Vec<_>>();
+    let file_paths = entries.iter().map(|entry| entry.path.clone()).collect::<Vec<_>>();
     let (tree_nodes, flat_paths) = build_tree(&entries);
-    Self::assemble(items, pages, select, warn_files, warn_specs, tree_nodes, flat_paths)
+    let mut ui =
+      Self::assemble(items, pages, select, warn_files, warn_specs, tree_nodes, flat_paths);
+    ui.file_paths = file_paths;
+    ui.project_root = root.clone();
+    if root.is_some() {
+      // Kick one initial check once the fresh window idles: the
+      // sentinel revision never matches real content, so the 2.5s
+      // timer fires one run even before the first keystroke.
+      ui.content_at_check = u64::MAX;
+      ui.last_change = Some(Instant::now());
+    }
+    ui
   }
 
   fn assemble(
@@ -626,6 +677,14 @@ impl EditorUi {
       selected_warn: 0,
       warn_rects: Vec::new(),
       page_total,
+      file_paths: Vec::new(),
+      project_root: None,
+      check_job: None,
+      check_generation: 0,
+      content_at_check: 0,
+      last_change: None,
+      check_glass: BasicToolbar::new(),
+      check_text: BasicText::new(lang::t("check.indexing")),
       nav_tree,
       tree_paths: flat_paths,
       tree_sel,
@@ -671,6 +730,139 @@ impl EditorUi {
       ed.tick(now_secs);
       ed.poll_autosave();
     });
+  }
+
+  /// Sum of all page mutation counters (drives check scheduling).
+  fn content_revision(&mut self) -> u64 {
+    let mut sum = 0u64;
+    self.each_page(|ed| sum += ed.edit_revision());
+    sum
+  }
+
+  /// Record a content-changing keystroke for the 2.5s check delay,
+  /// but only when the active page is really editable.
+  fn note_change_if_editable(&mut self) {
+    let selected = self.sidebar.selected_index();
+    let editable = self
+      .sidebar
+      .page_mut(selected)
+      .and_then(|page| page.as_any_mut().downcast_mut::<CodeEditor>())
+      .is_some_and(|ed| !ed.is_read_only());
+    if editable {
+      self.last_change = Some(Instant::now());
+    }
+  }
+
+  /// Row index for a rustc file path (relative to the project root).
+  /// Foreign crate diagnostics match nothing and are skipped.
+  fn match_row(&self, root: &Path, file: &str) -> Option<usize> {
+    let absolute = root.join(file);
+    self.file_paths.iter().position(|path| *path == absolute)
+  }
+
+  /// Single-job scheduler, called every frame: reaps finished runs,
+  /// cancels a running job once newer keystrokes exist (killing its
+  /// child), and starts a fresh run after 2.5s idle when the content
+  /// moved past the last applied result. Files are flushed to disk
+  /// before every spawn so the check sees the latest text.
+  fn poll_check(&mut self) {
+    let mut finished: Option<CheckResult> = None;
+    let mut gone = false;
+    if let Some(job) = &self.check_job {
+      match job.rx.try_recv() {
+        Ok(result) => finished = Some(result),
+        Err(TryRecvError::Empty) => {}
+        Err(TryRecvError::Disconnected) => gone = true,
+      }
+    }
+    if let Some(result) = finished {
+      self.check_job = None;
+      if result.generation == self.check_generation {
+        self.apply_check_result(result);
+      }
+    } else if gone {
+      // The worker died without a result (e.g. cargo missing):
+      // back off until the next keystroke instead of respawning
+      // every frame.
+      self.check_job = None;
+      self.content_at_check = self.content_revision();
+    }
+    if let Some(job) = self.check_job.take() {
+      // A newer keystroke revision cancels the running job: the
+      // worker drops its result and the child is killed.
+      let revision = self.content_revision();
+      if revision != job.revision {
+        job.cancel.store(true, Ordering::Relaxed);
+        if let Ok(mut slot) = job.child.lock() {
+          if let Some(mut child) = slot.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+          }
+        }
+      } else {
+        self.check_job = Some(job);
+      }
+    }
+    if self.check_job.is_some() {
+      return;
+    }
+    let Some(root) = self.project_root.clone() else {
+      return;
+    };
+    if !root.join("Cargo.toml").is_file() {
+      return;
+    }
+    if self.content_revision() == self.content_at_check {
+      return;
+    }
+    let quiet = self
+      .last_change
+      .is_some_and(|at| at.elapsed() >= CHECK_IDLE_DELAY);
+    if !quiet {
+      return;
+    }
+    self.save_all_now();
+    let revision = self.content_revision();
+    self.start_check(root, revision);
+  }
+
+  /// Spawn one background `cargo check` for `revision`.
+  fn start_check(&mut self, root: PathBuf, revision: u64) {
+    self.check_generation += 1;
+    let generation = self.check_generation;
+    let cancel = Arc::new(AtomicBool::new(false));
+    let child = Arc::new(Mutex::new(None));
+    let (tx, rx) = std::sync::mpsc::channel();
+    spawn_check(root, generation, revision, cancel.clone(), child.clone(), tx);
+    self.check_job = Some(ActiveCheck { revision, rx, cancel, child });
+  }
+
+  /// Replace the warnings list and gutter markers with real check
+  /// diagnostics (What plus file and line per row).
+  fn apply_check_result(&mut self, result: CheckResult) {
+    self.content_at_check = result.revision;
+    let Some(root) = self.project_root.clone() else {
+      return;
+    };
+    let mut items = Vec::new();
+    for diag in result.diagnostics.iter().take(crate::check::MAX_DIAGNOSTICS) {
+      if let Some(index) = self.match_row(&root, &diag.file) {
+        items.push(WarnItem {
+          error: diag.error,
+          title: diagnostic_title(diag),
+          file: index,
+          line: diag.line.max(1),
+        });
+      }
+    }
+    items.sort_by(|a, b| (a.file, a.line).cmp(&(b.file, b.line)));
+    self.selected_warn = 0;
+    self.warn_rows = items
+      .iter()
+      .map(|item| warn_row(item.icon(), &item.title, &item.subtitle(&self.warn_files)))
+      .collect();
+    self.warn_items = items;
+    self.sync_diagnostics();
   }
 
   /// Write every dirty bound file now (used on quit paths).
@@ -780,6 +972,10 @@ impl EditorUi {
     let (mode, focused) = (theme.mode, self.focused);
     self.bg = palette.bg;
 
+    // Background check scheduling (reap, cancel on new keystrokes,
+    // spawn after 2.5s idle). Files were flushed before every spawn.
+    self.poll_check();
+
     self.sidebar.set_theme(palette.accent, dark);
     self.sidebar.set_glass(theme.mode, theme.glass);
     self.sidebar.set_focused(focused);
@@ -800,6 +996,10 @@ impl EditorUi {
     self.chev.set_focused(focused);
     self.inspector.set_theme(theme.mode, theme.glass);
     self.inspector.set_focused(focused);
+    self.check_glass.set_theme(theme.mode, theme.glass);
+    self.check_glass.set_focused(focused);
+    self.check_text.set_theme(theme.mode);
+    self.check_text.set_focused(focused);
     self.nav_tabs.set_theme(theme.mode, theme.glass);
     self.nav_tabs.set_focused(focused);
     self.nav_tree.set_theme(palette.accent, dark);
@@ -981,16 +1181,27 @@ impl EditorUi {
     let (chev_w, _) = self.chev.measure(fonts);
     self.chev.place(fonts, content_x + SEARCH_PAD, viewport.y + 14.0, chev_w, 36.0);
     self.chev.draw(scene, fonts, images);
-    // Notes placeholder pill at the content right: toggles a state
-    // for the later notes area, no panel yet.
+    // Check status pill left of the performance pill: a glass body
+    // with the `check.indexing` label, only while a check runs.
     let (insp_w, _) = self.inspector.measure(fonts);
-    self.inspector.place(
-      fonts,
-      content_x + content_w - SEARCH_PAD - insp_w,
-      viewport.y + 14.0,
-      insp_w,
-      36.0,
-    );
+    let insp_x = content_x + content_w - SEARCH_PAD - insp_w;
+    if self.check_job.is_some() {
+      let (text_w, text_h) = self.check_text.measure(fonts);
+      let pad = 14.0;
+      let pill_w = text_w + pad * 2.0;
+      let pill_x = (insp_x - 8.0 - pill_w).max(content_x + SEARCH_PAD);
+      self.check_glass.place(fonts, pill_x, viewport.y + 14.0, pill_w, 36.0);
+      self.check_glass.draw(scene, fonts, images);
+      self.check_text.place(
+        fonts,
+        pill_x + pad,
+        viewport.y + 14.0 + ((36.0 - text_h) / 2.0).max(0.0),
+        text_w,
+        text_h,
+      );
+      self.check_text.draw(scene, fonts, images);
+    }
+    self.inspector.place(fonts, insp_x, viewport.y + 14.0, insp_w, 36.0);
     self.inspector.draw(scene, fonts, images);
     // Divider between the topbar pills above and the editor below.
     self.top_div.place(fonts, content_x + SEARCH_PAD, viewport.y + 54.0, content_w - SEARCH_PAD * 2.0, 1.0);
@@ -1117,16 +1328,26 @@ impl EditorUi {
 
   pub fn type_text(&mut self, content: &str) {
     // Search first while it holds focus, else the active code page.
-    // Edits stay in memory only.
+    // Bound files auto-save 400ms after typing stops.
     self.search.type_text(content);
     self.sidebar.page_text(content);
+    self.note_change_if_editable();
   }
 
   pub fn key(&mut self, key: Key) -> bool {
     if self.search.key(key) {
       return true;
     }
-    self.sidebar.page_key(key)
+    let consumed = self.sidebar.page_key(key);
+    if consumed {
+      match key {
+        Key::Backspace | Key::Enter | Key::Cut | Key::Paste | Key::Undo | Key::Redo => {
+          self.note_change_if_editable();
+        }
+        _ => {}
+      }
+    }
+    consumed
   }
 
   pub fn wants_text_cursor(&self) -> bool {
@@ -1147,6 +1368,8 @@ impl EditorUi {
     self.menu_glass.set_focused(focused);
     self.chev.set_focused(focused);
     self.inspector.set_focused(focused);
+    self.check_glass.set_focused(focused);
+    self.check_text.set_focused(focused);
     self.nav_tabs.set_focused(focused);
     self.nav_tree.set_focused(focused);
     self.warn_bg.set_focused(focused);
@@ -1480,6 +1703,130 @@ mod tests {
   fn open_rejects_missing_dir() {
     let missing = std::path::Path::new("/definitely/not/here-xcode");
     assert!(EditorUi::open("x", missing).is_err());
+  }
+
+  fn scaffold_root(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let parent = std::env::temp_dir()
+      .join(format!("xcode-check-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&parent);
+    std::fs::create_dir_all(&parent).unwrap();
+    let root = crate::scaffold::create_project(&parent, "My App", "", "1.0", "de.x")
+      .expect("scaffold");
+    (parent, root)
+  }
+
+  #[test]
+  fn open_arms_initial_check() {
+    let (parent, root) = scaffold_root("initial");
+    let ui = EditorUi::open("My App", &root).expect("open");
+    // Sentinel revision plus fresh timer: the first 2.5s idle window
+    // fires one check even before the first keystroke.
+    assert_eq!(ui.content_at_check, u64::MAX);
+    assert!(ui.last_change.is_some());
+    assert!(ui.check_job.is_none());
+    assert!(ui.project_root.is_some());
+    let _ = std::fs::remove_dir_all(&parent);
+  }
+
+  #[test]
+  fn check_maps_diagnostics_to_rows_and_gutters() {
+    use crate::check::{CheckDiagnostic, CheckResult};
+    let (parent, root) = scaffold_root("map");
+    let entries = crate::project_files::list_project_files(&root);
+    let rs = entries
+      .iter()
+      .position(|entry| !entry.is_dir && entry.label.trim().ends_with(".rs"))
+      .expect("rs file");
+    let rel = entries[rs]
+      .path
+      .strip_prefix(&root)
+      .expect("relative")
+      .to_string_lossy()
+      .replace('\\', "/");
+    let mut ui = EditorUi::open("My App", &root).expect("open");
+    let result = CheckResult {
+      generation: 1,
+      revision: 7,
+      diagnostics: vec![
+        CheckDiagnostic {
+          file: rel,
+          line: 3,
+          col: 5,
+          error: true,
+          message: "mismatched types".to_string(),
+          code: Some("E0308".to_string()),
+        },
+        CheckDiagnostic {
+          file: "some/foreign/crate.rs".to_string(),
+          line: 1,
+          col: 1,
+          error: true,
+          message: "foreign".to_string(),
+          code: None,
+        },
+      ],
+    };
+    ui.check_generation = 1;
+    ui.apply_check_result(result);
+    // Only the project file survives, with What plus file and line.
+    assert_eq!(ui.warn_items.len(), 1);
+    assert_eq!(ui.warn_items[0].file, rs);
+    assert_eq!(ui.warn_items[0].line, 3);
+    assert!(ui.warn_items[0].error);
+    assert!(ui.warn_items[0].title.contains("mismatched types"));
+    assert!(ui.warn_items[0].title.contains("E0308"));
+    assert_eq!(ui.warn_rows.len(), 1);
+    assert_eq!(ui.content_at_check, 7);
+    // Gutter markers land on the right page and line.
+    let page = ui.sidebar.page_mut(rs).expect("page");
+    let ed = page
+      .as_any_mut()
+      .downcast_mut::<CodeEditor>()
+      .expect("code page");
+    assert_eq!(ed.marker_at(3), Some(true));
+    assert_eq!(ed.marker_at(2), None);
+    let _ = std::fs::remove_dir_all(&parent);
+  }
+
+  #[test]
+  fn poll_check_stays_idle_without_changes() {
+    let (parent, root) = scaffold_root("idle");
+    let mut ui = EditorUi::open("My App", &root).expect("open");
+    // Fresh revision matches the applied one: no spawn, no thread.
+    ui.content_at_check = ui.content_revision();
+    ui.poll_check();
+    assert!(ui.check_job.is_none());
+    let _ = std::fs::remove_dir_all(&parent);
+  }
+
+  #[test]
+  fn poll_check_cancels_job_on_new_keystrokes() {
+    let (parent, root) = scaffold_root("cancel");
+    let mut ui = EditorUi::open("My App", &root).expect("open");
+    // Fake running job without a thread (cancelled channel).
+    let (_tx, rx) = std::sync::mpsc::channel();
+    ui.check_job = Some(ActiveCheck {
+      revision: ui.content_revision(),
+      rx,
+      cancel: Arc::new(AtomicBool::new(false)),
+      child: Arc::new(Mutex::new(None)),
+    });
+    // Typing on the selected editable page moves the revision.
+    let sel = ui.sidebar.selected_index();
+    {
+      let page = ui.sidebar.page_mut(sel).expect("page");
+      let ed = page
+        .as_any_mut()
+        .downcast_mut::<CodeEditor>()
+        .expect("code page");
+      assert!(!ed.is_read_only());
+      ed.goto_line(1);
+    }
+    ui.type_text("// late keystroke");
+    ui.poll_check();
+    // Cancelled and, still inside the idle window, not respawned.
+    assert!(ui.check_job.is_none());
+    let _ = std::fs::remove_dir_all(&parent);
   }
 
   #[test]

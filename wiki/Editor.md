@@ -140,6 +140,22 @@ next to `XCODE_PROJECT_NAME`).
   `EditorUi` hands each `CodeEditor` its warning and error lines
   per file every frame; marked lines keep a tinted gutter badge, a
   tinted number and a line wash in both themes.
+- Background check (`src/check.rs`, no new dependencies): 2.5s after
+  the last content-changing keystroke (`CHECK_IDLE_DELAY`) and once
+  after opening a project, the editor flushes all files and spawns
+  exactly one `cargo check --message-format=json` worker thread in
+  the project root. While it runs, a glass pill with the localized
+  `check.indexing` (`Indexing Files...`) label sits left of the
+  performance pill. A keystroke after the job start cancels it (the
+  child is killed) and a fresh job starts once typing stops again;
+  stale generations are dropped. JSON parses through Foundation
+  `JsonValue` (serde-free); only `compiler-message` entries with
+  `error` or `warning` level survive, mapped to their primary span.
+  `apply_check_result` replaces the warnings list (What plus file
+  and line per row, diagnostic code appended, foreign crates
+  skipped) and the gutter markers follow through
+  `sync_diagnostics`. Nothing is ever built or run: Run/Stop stays
+  dead.
 - Row interaction on the start page: single tap selects
   (`selected`), double tap (same row within 450ms) hands over to the
   supervisor. Project rows are excluded from the background drag

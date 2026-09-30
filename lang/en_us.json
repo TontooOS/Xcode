@@ -38,6 +38,7 @@
     "issue.unresolved_import": "Unresolved import `HashMap`",
     "issue.missing_docs": "Missing docs for `tick`",
     "panel.no_logs": "No Logs",
-    "panel.no_metrics": "No Performance Metrics"
+    "panel.no_metrics": "No Performance Metrics",
+    "check.indexing": "Indexing Files..."
   }
 }

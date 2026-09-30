@@ -38,6 +38,7 @@
     "issue.unresolved_import": "Import `HashMap` nicht gefunden",
     "issue.missing_docs": "Doku für `tick` fehlt",
     "panel.no_logs": "Keine Logs",
-    "panel.no_metrics": "Keine Leistungsmetriken"
+    "panel.no_metrics": "Keine Leistungsmetriken",
+    "check.indexing": "Dateien werden indexiert..."
   }
 }

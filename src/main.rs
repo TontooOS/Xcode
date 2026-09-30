@@ -18,6 +18,7 @@
 //! `#FFFFFF`).
 
 mod code_editor;
+mod check;
 mod editor;
 mod icon;
 mod lang;

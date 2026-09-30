@@ -349,6 +349,8 @@ pub struct CodeEditor {
   read_only: bool,
   /// Unsaved changes since the last write.
   dirty: bool,
+  /// Mutation counter for the background check scheduler.
+  edit_revision: u64,
   /// Last keystroke time for the 400ms auto-save delay.
   last_edit: Option<Instant>,
   caret: usize,
@@ -414,6 +416,7 @@ impl CodeEditor {
       file: None,
       read_only: false,
       dirty: false,
+      edit_revision: 0,
       last_edit: None,
       caret,
       anchor: caret,
@@ -480,6 +483,12 @@ impl CodeEditor {
     self.dirty
   }
 
+  /// Mutation counter, bumped on every real edit (read-only pages
+  /// never bump). The editor uses it to schedule background checks.
+  pub fn edit_revision(&self) -> u64 {
+    self.edit_revision
+  }
+
   /// Mark the buffer edited: dirty plus keystroke time for the 400ms
   /// auto-save delay. No-op on read-only pages.
   fn mark_edited(&mut self) {
@@ -487,6 +496,7 @@ impl CodeEditor {
       return;
     }
     self.dirty = true;
+    self.edit_revision += 1;
     self.last_edit = Some(Instant::now());
   }
 
@@ -2078,6 +2088,26 @@ mod tests {
     assert!(!ed.is_dirty());
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "old new");
     let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  #[test]
+  fn edit_revision_bumps_on_mutation_only() {
+    let mut ed = CodeEditor::new("hi".to_string());
+    assert_eq!(ed.edit_revision(), 0);
+    ed.selected = true;
+    ed.type_text("!");
+    assert_eq!(ed.edit_revision(), 1);
+    assert!(ed.press_key(Key::Backspace));
+    assert_eq!(ed.edit_revision(), 2);
+    // Navigation never bumps.
+    assert!(ed.press_key(Key::Left));
+    assert_eq!(ed.edit_revision(), 2);
+    // Read-only pages never bump.
+    let mut ro = CodeEditor::new("hi".to_string());
+    ro.set_file(None, true);
+    ro.selected = true;
+    ro.type_text("!");
+    assert_eq!(ro.edit_revision(), 0);
   }
 
   #[test]
