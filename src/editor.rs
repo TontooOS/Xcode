@@ -57,6 +57,12 @@ const GLASS_PAD: f32 = 16.0;
 /// the full sidebar column.
 const SEARCH_H: f32 = 28.0;
 const SEARCH_PAD: f32 = 8.0;
+/// Compact navigator rows (defaults 34.5/22/10/14 stay chunkier);
+/// folders and files share one size and differ by icon only.
+const NAV_ROW_H: f32 = 28.0;
+const NAV_ROW_ICON: f32 = 18.0;
+const NAV_ROW_GAP: f32 = 8.0;
+const NAV_ROW_LABEL: f32 = 12.0;
 /// Navigator tab switcher geometry: 36px pill in the blank gap
 /// between the 64px toolbar zone and the file rows at 108px.
 const NAV_TABS_Y: f32 = 66.0;
@@ -370,6 +376,8 @@ impl EditorUi {
     // pill right instead.
     sidebar.set_title(String::new());
     sidebar.select(select);
+    // Compact rows for the file list (folders and files alike).
+    sidebar.set_row_metrics(NAV_ROW_H, NAV_ROW_ICON, NAV_ROW_GAP, NAV_ROW_LABEL);
     // The element defaults item labels to hand-set white, which wins
     // over the theme in light mode: clear the override once so labels
     // follow `set_theme` (dark `#d8d9d9`, light `#272727`).
@@ -1189,6 +1197,8 @@ mod tests {
     assert_eq!(ui.nav_tabs.selected_index(), 0);
     assert_eq!(ui.warn_items.len(), 5);
     assert_eq!(ui.warn_rows.len(), 5);
+    // Compact rows, one size for folders and files.
+    assert_eq!(ui.sidebar.row_metrics(), (28.0, 18.0, 8.0, 12.0));
     // 3 warnings plus 2 errors, all pointing at real rows.
     let errors = ui.warn_items.iter().filter(|item| item.error).count();
     assert_eq!(errors, 2);
