@@ -415,8 +415,9 @@ impl EditorUi {
     sidebar.set_item_text(None);
     // Bottom panel master switch: the performance pill flips it,
     // `draw` applies edges to every page (divider taps stay per
-    // page, see `apply_panel_open`).
-    let panel_open = Rc::new(Cell::new(true));
+    // page, see `apply_panel_open`). Starts closed, nothing is
+    // generated, placeholders show instead.
+    let panel_open = Rc::new(Cell::new(false));
     let panel_toggle = panel_open.clone();
     // Navigator tabs: `Files` default plus `Warnings & Errors`.
     // Bar switcher with icon plus label cells in the blank gap
@@ -488,7 +489,7 @@ impl EditorUi {
       ]),
       inspector,
       panel_open,
-      last_panel_open: Cell::new(true),
+      last_panel_open: Cell::new(false),
       nav_tabs,
       nav_tab,
       warn_items,
@@ -533,8 +534,8 @@ impl EditorUi {
     }
   }
 
-  /// Advance fake stats and logs on every page with the frame time
-  /// (one sample plus one log line per second, example only).
+  /// Frame clock hook for every page: generates nothing, the
+  /// bottom panel keeps its empty placeholders.
   fn tick_code_pages(&mut self, now_secs: f64) {
     self.each_page(|ed| ed.tick(now_secs));
   }
@@ -1128,11 +1129,21 @@ mod tests {
 
   #[test]
   fn performance_pill_toggles_bottom_panel() {
-    // Fresh editors show the bottom panel; the performance pill
-    // folds it away on every page and back.
+    // Fresh editors keep the bottom panel folded away on every page;
+    // the performance pill opens it and folds it back.
     let code = example_code("testApp", "test", "arlo");
     let mut ui = EditorUi::new("test", code);
+    assert!(!ui.panel_open());
+    ui.toggle_panel();
     assert!(ui.panel_open());
+    for index in 0..ui.page_total {
+      let page = ui.sidebar.page_mut(index).expect("page");
+      let ed = page
+        .as_any_mut()
+        .downcast_mut::<CodeEditor>()
+        .expect("code page");
+      assert!(!ed.panel_collapsed());
+    }
     ui.toggle_panel();
     assert!(!ui.panel_open());
     for index in 0..ui.page_total {
@@ -1143,8 +1154,6 @@ mod tests {
         .expect("code page");
       assert!(ed.panel_collapsed());
     }
-    ui.toggle_panel();
-    assert!(ui.panel_open());
   }
 
   #[test]

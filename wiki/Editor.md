@@ -56,7 +56,7 @@ pages: narrow windows squeeze the code, wide windows use everything.
   selection, gutter badges and line washes all use the row pitch
   measured from the laid-out rows (never a fixed px guess), so the
   highlight cannot drift off the lines further down; the wheel scrolls vertically with caret tracking so the caret stays visible; edits stay in memory only. No breadcrumb, no status bar (removed) |
-| `bottom` | divider + `CodeEditor` panel | Bottom area below the code with a drag divider: click collapses or expands it like a sidebar, dragging resizes it between 100px and 420px (180px default); the divider turns 2px accent while hovering or dragging like the sidebar edge and shows the resize cursor; left `Performance` stats as a divider-free 2x2 grid (CPU top left, GPU top right, RAM bottom left in MB, bottom right split into Disk in MB/s and Network in Mb/s) with one colorful sparkline plus live value per metric sampling every 1s (fake in-memory data, custom Vello paths, user-approved); right `Logs` with a fake cargo build loop growing every 1s (capped at 300 lines) on the standard overlay `Scrollbar` with wheel, thumb drag, track jump and bottom stick; all example only, nothing runs |
+| `bottom` | divider + `CodeEditor` panel | Bottom area below the code with a drag divider: folded away by default, click expands or collapses it like a sidebar, dragging resizes it between 100px and 420px (180px default); the divider turns 2px accent while hovering or dragging like the sidebar edge and shows the resize cursor; left `Performance` stats as a divider-free 2x2 grid (CPU top left, GPU top right, RAM bottom left in MB, bottom right split into Disk in MB/s and Network in Mb/s) keeping labels and values with the localized `panel.no_metrics` (`No Performance Metrics`) text where graphs would sit, no graphs; right `Logs` with the localized `panel.no_logs` (`No Logs`) placeholder; nothing is generated, all example only, nothing runs |
 | `status` | page `HStack` | `Filter` (`ed.filter`), `Spacer`, `Line: 1  Col: 1` (`ed.status`) |
 
 ```rust
@@ -101,23 +101,19 @@ next to `XCODE_PROJECT_NAME`).
   select, I-beam hover, typing, `Backspace`, `Enter`, arrows, `ESC`
   to unfocus, `Ctrl+A/C/X/V/Z/Y` for select, clipboard, undo and redo
   with an in-memory clipboard capped at 100 undo steps).
-- Below the code sits a bottom panel with a drag divider: click
-  collapses or expands it like a sidebar, dragging resizes it
-  (100px..420px, 180px default); the divider turns 2px accent while
-  hovering or dragging like the sidebar edge and the cursor turns
-  into the resize cursor there. The left `Performance` stats form a
-  divider-free 2x2 grid (CPU top left, GPU top right, RAM bottom
-  left in MB, bottom right split into Disk in MB/s and Network in
-  Mb/s) with one colorful
-  sparkline plus live value per metric (Vello paths, user-approved
-  custom drawing; graph colors are fixed per metric so the lines
-  stay distinguishable) sampling fake in-memory values every 1s; the
-  right `Logs`
-  shows a fake cargo build loop growing every 1s (capped at 300
-  lines) on its own standard `Scrollbar` sticking to the bottom.
-  `EditorUi` ticks the active code page with the frame time and
-  the performance pill toggles the bottom panel on every page; all
-  example only, nothing runs.
+- Below the code sits a bottom panel with a drag divider: folded
+  away by default, click expands or collapses it like a sidebar,
+  dragging resizes it (100px..420px, 180px default); the divider
+  turns 2px accent while hovering or dragging like the sidebar edge
+  and the cursor turns into the resize cursor there. The left
+  `Performance` stats form a divider-free 2x2 grid (CPU top left,
+  GPU top right, RAM bottom left in MB, bottom right split into Disk
+  in MB/s and Network in Mb/s) keeping labels and values with the
+  localized `panel.no_metrics` text instead of graphs; the right
+  `Logs` shows the localized `panel.no_logs` placeholder. Nothing is
+  generated. `EditorUi` ticks the active code page with the frame
+  time (no-op) and the performance pill toggles the bottom panel on
+  every page; all example only, nothing runs.
 - `EditorUi` owns its `ThemeWatcher`; text and keys reach the active
   code page through `sidebar.page_text` and `sidebar.page_key` when
   the search field is not selected; the cursor shows I-beam over

@@ -89,3 +89,4 @@ See [StartPage.md](StartPage.md) for details.
 - 2026-09-30: `CodeEditor` measures the real row pitch from the laid-out rows (fixes selection drift growing further down).
 - 2026-09-30: Panel divider turns 2px accent while hovering or resizing like the sidebar edge, with the resize cursor.
 - 2026-09-30: Notes placeholder pill (`sidebar.right`, round circle) at the content top right (toggles a state for the later notes area, no panel yet); `CodeEditor` scrolls vertically with the wheel plus caret tracking.
+- 2026-09-30: Bottom panel folded away by default with empty placeholders (`panel.no_logs` / `panel.no_metrics` in `lang/en_us.json` and `lang/de_de.json`); metric cells keep CPU/GPU/RAM/Disk/Network labels without graphs, nothing is generated.

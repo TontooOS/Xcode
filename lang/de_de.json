@@ -35,6 +35,8 @@
     "issue.type_mismatch": "Typfehler: `String` erwartet, `&str` gefunden",
     "issue.trailing_ws": "Leerzeichen am Zeilenende",
     "issue.unresolved_import": "Import `HashMap` nicht gefunden",
-    "issue.missing_docs": "Doku für `tick` fehlt"
+    "issue.missing_docs": "Doku für `tick` fehlt",
+    "panel.no_logs": "Keine Logs",
+    "panel.no_metrics": "Keine Leistungsmetriken"
   }
 }

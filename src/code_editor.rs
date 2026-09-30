@@ -17,10 +17,11 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use vello::Scene;
-use vello::kurbo::{Affine, BezPath, Cap, Circle, Join, Line, Rect, Stroke};
+use vello::kurbo::{Affine, Circle, Line, Rect, Stroke};
 use vello::peniko::{Brush, Color, Fill};
 
 use crate::DocumentKit::{SyntaxLang, highlight_syntax as highlight};
+use crate::lang;
 use crate::TontooUI::elements::{
   Align, BasicText, FormattedText, HStack, Scrollbar, Span, TextAlignment,
   TextForeground, TextStyle, View, VStack, DIVIDER_DARK, DIVIDER_LIGHT,
@@ -315,12 +316,6 @@ pub const PANEL_STATS_SPLIT: f32 = 0.6;
 /// Drag distance in logical px before a divider press becomes a
 /// resize instead of a collapse toggle.
 pub const PANEL_DRAG_SLOP: f32 = 4.0;
-/// Fake stats samples kept (60s at one sample per second).
-pub const STATS_CAP: usize = 60;
-/// Fake log lines kept.
-pub const LOGS_CAP: usize = 300;
-/// Seconds between fake samples and log lines.
-pub const TICK_SECONDS: f64 = 1.0;
 /// Log text size in logical px.
 pub const LOG_FONT_SIZE: f32 = 12.0;
 /// Log row height in logical px.
@@ -329,13 +324,6 @@ pub const LOG_LINE_H: f32 = 16.0;
 pub const PANEL_HEADER_H: f32 = 20.0;
 /// Panel label text size in logical px.
 pub const PANEL_LABEL_SIZE: f32 = 11.0;
-/// Fixed graph colors per metric (macOS system palette) so the
-/// sparkline lines stay distinguishable in both themes.
-pub const STAT_CPU: Color = Color::from_rgb8(0x0a, 0x84, 0xff);
-pub const STAT_GPU: Color = Color::from_rgb8(0xbf, 0x5a, 0xf2);
-pub const STAT_RAM: Color = Color::from_rgb8(0x30, 0xd1, 0x58);
-pub const STAT_DISK: Color = Color::from_rgb8(0xff, 0x9f, 0x0a);
-pub const STAT_NET: Color = Color::from_rgb8(0x64, 0xd2, 0xff);
 /// Diagnostic gutter and wash colors (match the navigator tints).
 pub const DIAG_ERROR: Color = Color::from_rgb8(0xff, 0x3b, 0x30);
 pub const DIAG_WARN: Color = Color::from_rgb8(0xff, 0xcc, 0x00);
@@ -347,7 +335,7 @@ pub const DIAG_DOT_R: f32 = 4.5;
 
 /// Editable code page: TontooUI rows plus caret, selection, the
 /// standard overlay `Scrollbar` and a collapsible bottom panel with
-/// fake performance stats and logs.
+/// empty performance stats and logs placeholders.
 pub struct CodeEditor {
   text: String,
   caret: usize,
@@ -384,21 +372,18 @@ pub struct CodeEditor {
   divider_moved: bool,
   /// Divider strip hovered (accent highlight plus resize cursor).
   divider_hover: bool,
-  /// Fake CPU/GPU/RAM/Disk/Net samples (0..100, one per second).
+  /// Metric values (always empty, nothing is generated).
   samples_cpu: Vec<f32>,
   samples_gpu: Vec<f32>,
   samples_ram: Vec<f32>,
   samples_disk: Vec<f32>,
   samples_net: Vec<f32>,
-  /// Fake cargo log lines.
+  /// Log lines (always empty, nothing is generated).
   logs: Vec<String>,
   /// Logs overlay bar plus model guard.
   log_bar: Scrollbar,
   log_model: (f32, f32),
-  /// Stick the logs to the bottom on new lines.
-  stick_logs: bool,
-  /// Fake tick counter and last tick time.
-  tick_count: u64,
+  /// Last frame time seen by `tick`.
   last_tick: f64,
   /// Last hover point for wheel routing.
   last_hover: (f32, f32),
@@ -434,7 +419,7 @@ impl CodeEditor {
       undo: Vec::new(),
       redo: Vec::new(),
       panel_h: PANEL_DEFAULT_H,
-      collapsed: false,
+      collapsed: true,
       divider_drag: false,
       divider_start: (0.0, 0.0),
       divider_moved: false,
@@ -447,8 +432,6 @@ impl CodeEditor {
       logs: Vec::new(),
       log_bar: Scrollbar::new(),
       log_model: (-1.0, -1.0),
-      stick_logs: true,
-      tick_count: 0,
       last_tick: 0.0,
       last_hover: (-1.0, -1.0),
       markers: Vec::new(),
@@ -1100,64 +1083,17 @@ impl CodeEditor {
     }
   }
 
-  /// Fake performance sample in 0..100 (deterministic drift plus
-  /// jitter from the tick counter, no IO).
-  fn fake_sample(tick: u64, phase: f32) -> f32 {
-    let t = tick as f32;
-    let jitter = ((tick.wrapping_mul(37)) % 13) as f32 - 6.0;
-    (48.0 + 26.0 * (t * 0.5 + phase).sin() + jitter).clamp(4.0, 98.0)
-  }
-
-  fn push_sample(series: &mut Vec<f32>, value: f32) {
-    series.push(value);
-    if series.len() > STATS_CAP {
-      series.remove(0);
-    }
-  }
-
   /// RAM label in MB for a 16 GB machine (0..100 maps to the full
   /// range), instead of a bare percent.
   fn ram_text(value: f32) -> String {
     format!("RAM {:.0} MB", value * 163.84)
   }
 
-  /// One fake cargo log line per tick (build loop, example only).
-  fn fake_log_line(tick: u64) -> String {
-    match tick % 6 {
-      0 => "   Compiling xcode v27.0.0".to_string(),
-      1 => "   Compiling sdk v27.0.0 (/Library/System/sdk)".to_string(),
-      2 => "    Finished `dev` profile [unoptimized + debuginfo]".to_string(),
-      3 => "     Running `target/debug/xcode`".to_string(),
-      4 => "warning: unused variable `offset`".to_string(),
-      _ => "    Finished in 1.24s".to_string(),
-    }
-  }
-
-  /// Advance fake stats and logs. Called with the frame time by the
-  /// app (see `EditorUi`); appends one sample plus one log line per
-  /// elapsed second. Edits stay in memory only, nothing runs.
+  /// Frame clock hook: generates nothing. Performance samples and
+  /// logs stay empty, the panel shows `panel.no_metrics` /
+  /// `panel.no_logs` placeholders instead.
   pub fn tick(&mut self, now_secs: f64) {
-    if now_secs - self.last_tick < TICK_SECONDS {
-      return;
-    }
     self.last_tick = now_secs;
-    self.tick_count += 1;
-    Self::push_sample(&mut self.samples_cpu, Self::fake_sample(self.tick_count, 0.0));
-    Self::push_sample(&mut self.samples_gpu, Self::fake_sample(self.tick_count, 1.3));
-    Self::push_sample(&mut self.samples_ram, Self::fake_sample(self.tick_count, 2.1));
-    Self::push_sample(&mut self.samples_disk, Self::fake_sample(self.tick_count, 2.8));
-    Self::push_sample(&mut self.samples_net, Self::fake_sample(self.tick_count, 3.6));
-    self.logs.push(Self::fake_log_line(self.tick_count));
-    if self.logs.len() > LOGS_CAP {
-      let drop = self.logs.len() - LOGS_CAP;
-      self.logs.drain(..drop);
-    }
-    // Stay stuck to the bottom while the user never scrolled up.
-    if self.stick_logs {
-      let list_h = self.zones().4.3 - PANEL_HEADER_H;
-      let max = (self.logs.len() as f32 * LOG_LINE_H - list_h).max(0.0);
-      self.log_bar.set_offset(max);
-    }
   }
 
   /// Sync the logs bar model (guarded like the code bar so the
@@ -1192,47 +1128,11 @@ impl CodeEditor {
     draw_layout(scene, &layout, x, y, fonts.scale);
   }
 
-  /// One sparkline polyline for `samples` (oldest left, newest
-  /// right) in custom Vello paths (user-approved: TontooUI ships no
-  /// line chart, only gauges).
-  fn draw_spark(
-    scene: &mut Scene,
-    scale: f32,
-    samples: &[f32],
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-    color: Color,
-  ) {
-    if w <= 0.0 || h <= 0.0 || samples.len() < 2 {
-      return;
-    }
-    let step = 4.0;
-    let max_n = ((w / step) as usize).max(2);
-    let skip = samples.len().saturating_sub(max_n);
-    let data = &samples[skip..];
-    let mut path = BezPath::new();
-    for (i, v) in data.iter().enumerate() {
-      let px = x + i as f32 * step;
-      let py = y + h - (v.clamp(0.0, 100.0) / 100.0) * h;
-      if i == 0 {
-        path.move_to((px as f64, py as f64));
-      } else {
-        path.line_to((px as f64, py as f64));
-      }
-    }
-    let mut stroke = Stroke::new(1.5 * scale as f64);
-    stroke.start_cap = Cap::Round;
-    stroke.end_cap = Cap::Round;
-    stroke.join = Join::Round;
-    scene.stroke(&stroke, Affine::IDENTITY, &Brush::Solid(color), None, &path);
-  }
-
   /// Left panel stats: `Performance` header plus a divider-free 2x2
   /// grid (CPU top left, GPU top right, RAM bottom left, bottom right
-  /// split into Disk and Network) with one fixed-color sparkline per
-  /// metric (fake in-memory data, example only).
+  /// split into Disk and Network). No samples are generated, so every
+  /// cell keeps its label and shows the localized `panel.no_metrics`
+  /// text where the graph would sit.
   fn draw_stats(
     &self,
     scene: &mut Scene,
@@ -1268,20 +1168,33 @@ impl CodeEditor {
     let disk = self.samples_disk.last().copied().unwrap_or(0.0);
     let net = self.samples_net.last().copied().unwrap_or(0.0);
     let cells = [
-      (x0, top, col_w, row_h, format!("CPU {:.0}%", cpu), &self.samples_cpu, STAT_CPU),
-      (x1, top, col_w, row_h, format!("GPU {:.0}%", gpu), &self.samples_gpu, STAT_GPU),
-      (x0, top + row_h, col_w, row_h, Self::ram_text(ram), &self.samples_ram, STAT_RAM),
-      (x1, top + row_h, sub_w, row_h, format!("Disk {:.0} MB/s", disk * 3.2), &self.samples_disk, STAT_DISK),
-      (x1 + sub_w + gap, top + row_h, sub_w, row_h, format!("Network {:.0} Mb/s", net * 1.8), &self.samples_net, STAT_NET),
+      (x0, top, col_w, row_h, format!("CPU {:.0}%", cpu)),
+      (x1, top, col_w, row_h, format!("GPU {:.0}%", gpu)),
+      (x0, top + row_h, col_w, row_h, Self::ram_text(ram)),
+      (
+        x1,
+        top + row_h,
+        sub_w,
+        row_h,
+        format!("Disk {:.0} MB/s", disk * 3.2),
+      ),
+      (
+        x1 + sub_w + gap,
+        top + row_h,
+        sub_w,
+        row_h,
+        format!("Network {:.0} Mb/s", net * 1.8),
+      ),
     ];
-    for (cx, cy, cw, ch, label, samples, color) in cells {
-      Self::draw_metric(scene, fonts, dim, cx, cy, cw, ch, &label, samples, color);
+    for (cx, cy, cw, ch, label) in cells {
+      Self::draw_metric_empty(scene, fonts, dim, cx, cy, cw, ch, &label);
     }
   }
 
-  /// One stats cell: dim label on top, colorful sparkline below.
+  /// One stats cell: dim label on top, localized `panel.no_metrics`
+  /// placeholder below instead of a sparkline graph.
   /// Cells are spaced, never divided by rules.
-  fn draw_metric(
+  fn draw_metric_empty(
     scene: &mut Scene,
     fonts: &mut FontSystem,
     dim: Color,
@@ -1290,8 +1203,6 @@ impl CodeEditor {
     w: f32,
     h: f32,
     label: &str,
-    samples: &[f32],
-    color: Color,
   ) {
     if w <= 0.0 || h <= 0.0 {
       return;
@@ -1299,12 +1210,23 @@ impl CodeEditor {
     Self::draw_label(scene, fonts, label, PANEL_LABEL_SIZE, dim, x, y + 2.0);
     let gy = y + 16.0;
     let gh = (h - 18.0).max(0.0);
-    Self::draw_spark(scene, fonts.scale, samples, x, gy, w, gh, color);
+    if gh <= 0.0 {
+      return;
+    }
+    Self::draw_label(
+      scene,
+      fonts,
+      &lang::t("panel.no_metrics"),
+      PANEL_LABEL_SIZE,
+      dim,
+      x,
+      gy,
+    );
   }
 
-  /// Right panel logs: `Logs` header plus the fake cargo lines on
-  /// the standard overlay bar (wheel, thumb drag, track jump,
-  /// bottom stick while the user never scrolled up).
+  /// Right panel logs: `Logs` header plus the localized
+  /// `panel.no_logs` placeholder while empty (nothing is generated).
+  /// Keeps the standard overlay bar wiring for future lines.
   fn draw_logs(
     &mut self,
     scene: &mut Scene,
@@ -1329,6 +1251,18 @@ impl CodeEditor {
     let list_h = (logs.3 - PANEL_HEADER_H).max(0.0);
     let list_w = (logs.2 - pad).max(0.0);
     if list_w <= 0.0 || list_h <= 0.0 {
+      return;
+    }
+    if self.logs.is_empty() {
+      Self::draw_label(
+        scene,
+        fonts,
+        &lang::t("panel.no_logs"),
+        LOG_FONT_SIZE,
+        self.dim(),
+        x,
+        list_y,
+      );
       return;
     }
     self.sync_log_bar();
@@ -1645,15 +1579,12 @@ impl View for CodeEditor {
   }
 
   fn mouse_wheel(&mut self, dx: f64, dy: f64) {
-    // Route by last hover: logs zone drives the logs bar (and
-    // leaves the bottom stick once the user scrolls up), anywhere
+    // Route by last hover: logs zone drives the logs bar, anywhere
     // else drives the code bar.
     let (_, _, _, _, logs) = self.zones();
     let (hx, hy) = self.last_hover;
     if !self.collapsed && point_in(logs, hx, hy) {
       self.log_bar.mouse_wheel(dx, dy);
-      self.stick_logs =
-        self.log_bar.offset() >= self.log_bar.max_offset() - 1.0;
     } else {
       self.bar.mouse_wheel(dx, dy);
     }
@@ -1825,9 +1756,9 @@ mod tests {
   }
 
   #[test]
-  fn panel_starts_expanded() {
+  fn panel_starts_collapsed() {
     let ed = CodeEditor::new("hi".to_string());
-    assert!(!ed.panel_collapsed());
+    assert!(ed.panel_collapsed());
     assert_eq!(ed.panel_height(), PANEL_DEFAULT_H);
   }
 
@@ -1853,6 +1784,7 @@ mod tests {
   #[test]
   fn divider_click_collapses_panel() {
     let mut ed = CodeEditor::new("hi".to_string());
+    ed.set_collapsed(false);
     ed.rect = (0.0, 0.0, 400.0, 600.0);
     // Expanded: code 410px, divider 410..420.
     ed.press(200.0, 415.0);
@@ -1868,6 +1800,7 @@ mod tests {
   #[test]
   fn divider_drag_resizes_panel() {
     let mut ed = CodeEditor::new("hi".to_string());
+    ed.set_collapsed(false);
     ed.rect = (0.0, 0.0, 400.0, 600.0);
     ed.press(200.0, 415.0);
     <CodeEditor as View>::set_hover(&mut ed, 200.0, 375.0);
@@ -1879,6 +1812,7 @@ mod tests {
   #[test]
   fn divider_hover_requests_resize_cursor() {
     let mut ed = CodeEditor::new("hi".to_string());
+    ed.set_collapsed(false);
     ed.rect = (0.0, 0.0, 400.0, 600.0);
     assert!(!ed.wants_divider_cursor());
     // Divider strip 410..420.
@@ -1890,36 +1824,30 @@ mod tests {
   }
 
   #[test]
-  fn tick_samples_and_logs_each_second() {
+  fn tick_generates_nothing() {
     let mut ed = CodeEditor::new("hi".to_string());
     ed.rect = (0.0, 0.0, 400.0, 600.0);
     ed.tick(0.0);
     assert_eq!(ed.sample_count(), 0);
     assert!(ed.log_lines().is_empty());
     ed.tick(1.0);
-    assert_eq!(ed.sample_count(), 1);
-    assert_eq!(ed.log_lines().len(), 1);
-    ed.tick(1.5);
-    assert_eq!(ed.sample_count(), 1);
+    assert_eq!(ed.sample_count(), 0);
+    assert!(ed.log_lines().is_empty());
     ed.tick(2.0);
-    assert_eq!(ed.sample_count(), 2);
-    assert_eq!(ed.log_lines().len(), 2);
-    // All five metric series sample together.
-    assert_eq!(ed.samples_gpu.len(), 2);
-    assert_eq!(ed.samples_ram.len(), 2);
-    assert_eq!(ed.samples_disk.len(), 2);
-    assert_eq!(ed.samples_net.len(), 2);
+    assert_eq!(ed.sample_count(), 0);
+    assert!(ed.log_lines().is_empty());
+    assert!(ed.samples_gpu.is_empty());
+    assert!(ed.samples_ram.is_empty());
+    assert!(ed.samples_disk.is_empty());
+    assert!(ed.samples_net.is_empty());
   }
 
   #[test]
-  fn logs_and_samples_cap() {
-    let mut ed = CodeEditor::new("hi".to_string());
-    ed.rect = (0.0, 0.0, 400.0, 600.0);
-    for i in 1..=400u64 {
-      ed.tick(i as f64);
-    }
-    assert_eq!(ed.log_lines().len(), LOGS_CAP);
-    assert_eq!(ed.sample_count(), STATS_CAP);
+  fn panel_placeholders_stay_empty() {
+    let ed = CodeEditor::new("hi".to_string());
+    assert!(ed.panel_collapsed());
+    assert_eq!(ed.sample_count(), 0);
+    assert!(ed.log_lines().is_empty());
   }
 
   #[test]
