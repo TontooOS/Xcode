@@ -150,6 +150,31 @@ fn example_code(file: &str, project: &str, user: &str) -> String {
   example_rust_code(file, project, user)
 }
 
+/// File type icon plus tint by extension: `.rs` rust orange, `.proj`
+/// rotate purple, `.toml` gear gray, `.json` tray yellow, everything
+/// else the normal file icon following the accent.
+pub const FILE_RUST_TINT: Color = Color::from_rgb8(0xce, 0x42, 0x2b);
+pub const FILE_PROJ_TINT: Color = Color::from_rgb8(0xaf, 0x52, 0xde);
+pub const FILE_TOML_TINT: Color = Color::from_rgb8(0x8e, 0x8e, 0x93);
+pub const FILE_JSON_TINT: Color = Color::from_rgb8(0xff, 0xcc, 0x00);
+
+fn file_icon(name: &str) -> (&'static str, Option<Color>) {
+  let ext = name
+    .trim()
+    .rsplit('.')
+    .next()
+    .filter(|_| name.trim().contains('.'))
+    .unwrap_or("")
+    .to_lowercase();
+  match ext.as_str() {
+    "rs" => ("rust", Some(FILE_RUST_TINT)),
+    "proj" => ("rotate.3d", Some(FILE_PROJ_TINT)),
+    "toml" => ("gear", Some(FILE_TOML_TINT)),
+    "json" => ("tray.2.fill", Some(FILE_JSON_TINT)),
+    _ => ("doc.fill", None),
+  }
+}
+
 /// Resolve a bundled `Resources/<file>` raster (device glyphs).
 fn resource_path(file: &str) -> std::path::PathBuf {
   let mut candidates = Vec::new();
@@ -295,10 +320,16 @@ impl EditorUi {
     let items = entries
       .iter()
       .map(|entry| {
-        SidebarItem::new(
-          entry.label.clone(),
-          if entry.is_dir { "folder.fill" } else { "doc.fill" },
-        )
+        if entry.is_dir {
+          SidebarItem::new(entry.label.clone(), "folder.fill")
+        } else {
+          let (icon, tint) = file_icon(&entry.label);
+          let item = SidebarItem::new(entry.label.clone(), icon);
+          match tint {
+            Some(tint) => item.tint(tint),
+            None => item,
+          }
+        }
       })
       .collect::<Vec<_>>();
     let pages = entries
@@ -1114,6 +1145,19 @@ mod tests {
     }
     ui.toggle_panel();
     assert!(ui.panel_open());
+  }
+
+  #[test]
+  fn file_icon_maps_types_with_tints() {
+    assert_eq!(file_icon("  app.rs").0, "rust");
+    assert!(file_icon("app.rs").1.is_some());
+    assert_eq!(file_icon("tontoo.proj").0, "rotate.3d");
+    assert_eq!(file_icon("Cargo.toml").0, "gear");
+    assert_eq!(file_icon("en_us.json").0, "tray.2.fill");
+    assert_eq!(file_icon("README").0, "doc.fill");
+    assert_eq!(file_icon("README").1, None);
+    // Case-insensitive, indent-tolerant.
+    assert_eq!(file_icon("  MAIN.RS").0, "rust");
   }
 
   #[test]

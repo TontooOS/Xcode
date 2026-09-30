@@ -63,6 +63,11 @@ pages: narrow windows squeeze the code, wide windows use everything.
 pub fn file_stem(display_name: &str) -> String
 ```
 
+`file_icon` maps file names to SF Symbols plus tints: `.rs`
+`rust` orange, `.proj` `rotate.3d` purple, `.toml` `gear` gray,
+`.json` `tray.2.fill` yellow, everything else the normal `doc.fill`
+following the accent; folders keep `folder.fill`.
+
 ### Project files
 
 `EditorUi::open` lists the opened project root for the navigator:
