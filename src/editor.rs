@@ -212,6 +212,7 @@ impl EditorUi {
     let notes_toggle = notes_open.clone();
     let inspector =
       BasicToolbar::from_items(vec![ToolbarItem::icon("sidebar.right")])
+        .round(true)
         .on_action(move |_| notes_toggle.set(!notes_toggle.get()));
     Self {
       sidebar,
