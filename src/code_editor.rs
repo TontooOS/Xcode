@@ -596,7 +596,7 @@ impl CodeEditor {
     self.bar.mouse_wheel(dx, dy);
   }
 
-  fn line_col(&self) -> (usize, usize) {
+  pub(crate) fn line_col(&self) -> (usize, usize) {
     let caret = self.caret.min(self.text.len());
     let mut start = 0usize;
     for (i, part) in self.text.split('\n').enumerate() {
@@ -916,6 +916,19 @@ impl CodeEditor {
   fn finish_drag(&mut self, caret: usize) {
     self.caret = caret.min(self.text.len());
     self.sel = self.anchor != self.caret;
+    self.track_caret();
+  }
+
+  /// Jump the caret to the start of a 1-based line (warning
+  /// navigation): focuses, clears the highlight and scrolls the line
+  /// into view. Memory only, no fonts needed.
+  pub fn goto_line(&mut self, line: usize) {
+    let count = self.lines().len().max(1);
+    let line = line.max(1).min(count) - 1;
+    self.caret = self.caret_from_line_col(line, 0);
+    self.anchor = self.caret;
+    self.sel = false;
+    self.selected = true;
     self.track_caret();
   }
 
@@ -1625,6 +1638,23 @@ mod tests {
     assert_eq!(ed.selected_text(), "b");
     assert!(ed.press_key(Key::SelectRight));
     assert_eq!(ed.selected_text(), "bc");
+  }
+
+  #[test]
+  fn goto_line_lands_on_line_start() {
+    let mut ed = CodeEditor::new("ab\ncde\nf".to_string());
+    ed.rect = (0.0, 0.0, 300.0, 200.0);
+    ed.goto_line(2);
+    assert_eq!(ed.text_value(), "ab\ncde\nf");
+    let (line, col) = ed.line_col();
+    assert_eq!((line, col), (1, 0));
+    assert_eq!(ed.caret, 3);
+    // Out of range clamps to the first and last line.
+    ed.goto_line(0);
+    assert_eq!(ed.caret, 0);
+    ed.goto_line(99);
+    let (last, _) = ed.line_col();
+    assert_eq!(last, 2);
   }
 
   #[test]

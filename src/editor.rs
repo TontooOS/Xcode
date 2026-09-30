@@ -17,17 +17,21 @@ use std::rc::Rc;
 
 use crate::code_editor::{CodeEditor, example_rust_code};
 use crate::TontooUI::elements::{
-  BasicToolbar, FileImage, HorizontalDivider, MenuItem, NestedMenu,
-  SearchField, Sidebar, SidebarItem, ToolbarItem, TrafficAction, View,
-  MENU_BTN_PAD_X, MENU_CHEV_GAP, MENU_CHEV_W,
+  Align, BasicText, BasicToolbar, FileImage, HorizontalDivider, HStack,
+  MenuItem, NestedMenu, RoundedRectangle, SearchField, SFSymbolImage,
+  SegmentedPicker, ShapeFill, Sidebar, SidebarItem,
+  TextForeground, TextStyle, ToolbarItem, TrafficAction, View, VStack,
+  GROUP_BG_LIGHT, MENU_BTN_PAD_X, MENU_CHEV_GAP, MENU_CHEV_W,
+  SIDEBAR_BG_DARK,
 };
 use crate::TontooUI::renderer::window::{App, CursorKind, Key, Viewport, WindowCommand, run};
 use crate::TontooUI::renderer::{FontSystem, ImageLoader};
-use crate::TontooUI::theme::{ThemeMode, ThemeWatcher};
+use crate::TontooUI::theme::{ThemeMode, ThemeWatcher, desaturate};
 use crate::lang;
 use crate::scaffold::system_username;
 use vello::Scene;
-use vello::peniko::Color;
+use vello::kurbo::{Affine, Rect};
+use vello::peniko::{Brush, Color, Fill};
 
 /// Env handoff carrying the project name into the editor process.
 pub const PROJECT_ENV: &str = "XCODE_PROJECT_NAME";
@@ -49,6 +53,70 @@ const GLASS_PAD: f32 = 16.0;
 /// the full sidebar column.
 const SEARCH_H: f32 = 28.0;
 const SEARCH_PAD: f32 = 8.0;
+/// Navigator tab switcher geometry: 24px picker in the blank gap
+/// between the 64px toolbar zone and the file rows at 108px.
+const NAV_TABS_Y: f32 = 70.0;
+const NAV_TABS_H: f32 = 24.0;
+/// Warnings overlay: rows start below the picker, one 52px row per
+/// issue with a 6px gap.
+const WARN_TOP: f32 = 100.0;
+const WARN_ROW_H: f32 = 52.0;
+const WARN_GAP: f32 = 6.0;
+const WARN_ICON: f32 = 20.0;
+/// Warning icon tints (macOS system colors, both themes).
+const WARN_TINT: Color = Color::from_rgb8(0xff, 0xcc, 0x00);
+const ERROR_TINT: Color = Color::from_rgb8(0xff, 0x3b, 0x30);
+
+/// One example navigator issue: severity icon plus title, file row
+/// index and 1-based line for the jump to code.
+struct WarnItem {
+  error: bool,
+  title: String,
+  file: usize,
+  line: usize,
+}
+
+impl WarnItem {
+  fn icon(&self) -> &'static str {
+    if self.error {
+      "xmark.octagon.fill"
+    } else {
+      "exclamationmark.triangle.fill"
+    }
+  }
+
+  fn tint(&self) -> Color {
+    if self.error {
+      ERROR_TINT
+    } else {
+      WARN_TINT
+    }
+  }
+
+  fn subtitle(&self, files: &[String]) -> String {
+    let name = files.get(self.file).cloned().unwrap_or_default();
+    format!("{name}:{}", self.line)
+  }
+}
+
+/// One warnings overlay row: tinted severity icon plus title and
+/// file/line subtitle.
+fn warn_row(icon: &str, title: &str, subtitle: &str) -> HStack {
+  let texts = VStack::new()
+    .spacing(1.5)
+    .align(Align::Leading)
+    .child(BasicText::new(title).style(TextStyle::Caption))
+    .child(
+      BasicText::new(subtitle)
+        .style(TextStyle::Caption2)
+        .foreground(TextForeground::Secondary),
+    );
+  HStack::new()
+    .spacing(9.0)
+    .align(Align::Center)
+    .child(SFSymbolImage::new(icon).size(WARN_ICON))
+    .child(texts)
+}
 
 /// File stem rule mirroring the reference: alphanumeric name plus an
 /// `App` suffix unless it already ends in `app` (`test` -> `testApp`,
@@ -140,6 +208,22 @@ pub struct EditorUi {
   panel_open: Rc<Cell<bool>>,
   /// Last applied switch state (divider taps stay per page).
   last_panel_open: Cell<bool>,
+  /// Navigator tab switcher (`Files` default, `Warnings & Errors`).
+  nav_tabs: SegmentedPicker,
+  /// Active navigator tab, flipped by the picker.
+  nav_tab: Rc<Cell<usize>>,
+  /// Example navigator issues (3 warnings plus 2 errors).
+  warn_items: Vec<WarnItem>,
+  /// File names parallel to the sidebar items (for subtitles).
+  warn_files: Vec<String>,
+  /// Overlay rows parallel to the issues.
+  warn_rows: Vec<HStack>,
+  /// Accent wash behind the jumped-to warning.
+  warn_bg: RoundedRectangle,
+  /// Last jumped-to warning.
+  selected_warn: usize,
+  /// Placed warning row rects for tap jumps.
+  warn_rects: Vec<(f32, f32, f32, f32)>,
   /// Cached I-beam state for code pages (updated on hover).
   code_ibeam: Cell<bool>,
   /// Cached divider resize state for code pages (updated on hover).
@@ -215,6 +299,35 @@ impl EditorUi {
     // page, see `apply_panel_open`).
     let panel_open = Rc::new(Cell::new(true));
     let panel_toggle = panel_open.clone();
+    // Navigator tabs: `Files` default plus `Warnings & Errors`. The
+    // switcher overlays the blank gap above the file rows; the
+    // warnings tab covers the rows with the example issue list.
+    let nav_tab = Rc::new(Cell::new(0));
+    let tab_flip = nav_tab.clone();
+    let nav_tabs = SegmentedPicker::from_slice(
+      "",
+      &[&lang::t("nav.files"), &lang::t("nav.warnings")],
+    )
+    .selected(0)
+    .on_select(move |index| tab_flip.set(index));
+    let warn_files = vec![
+      project.to_string(),
+      "Assets".to_string(),
+      "ContentView".to_string(),
+      "Info".to_string(),
+      file_stem(project),
+    ];
+    let warn_items = vec![
+      WarnItem { error: false, title: lang::t("issue.unused_var"), file: 4, line: 36 },
+      WarnItem { error: true, title: lang::t("issue.type_mismatch"), file: 4, line: 33 },
+      WarnItem { error: false, title: lang::t("issue.trailing_ws"), file: 4, line: 9 },
+      WarnItem { error: true, title: lang::t("issue.unresolved_import"), file: 2, line: 1 },
+      WarnItem { error: false, title: lang::t("issue.missing_docs"), file: 4, line: 22 },
+    ];
+    let warn_rows = warn_items
+      .iter()
+      .map(|item| warn_row(item.icon(), &item.title, &item.subtitle(&warn_files)))
+      .collect();
     let inspector =
       BasicToolbar::from_items(vec![ToolbarItem::icon("chart.line.uptrend.xyaxis")])
         .round(true)
@@ -263,6 +376,15 @@ impl EditorUi {
       inspector,
       panel_open,
       last_panel_open: Cell::new(true),
+      nav_tabs,
+      nav_tab,
+      warn_items,
+      warn_files,
+      warn_rows,
+      warn_bg: RoundedRectangle::new(200.0, WARN_ROW_H, 8.0)
+        .fill(Color::from_rgb8(0x00, 0x7a, 0xff)),
+      selected_warn: 0,
+      warn_rects: Vec::new(),
       code_ibeam: Cell::new(false),
       divider_cursor: Cell::new(false),
       watcher: ThemeWatcher::new(),
@@ -314,6 +436,33 @@ impl EditorUi {
     self.panel_open.set(open);
     self.last_panel_open.set(open);
     self.apply_panel_open(open);
+  }
+
+  /// Jump to an example issue: back to the `Files` tab, select its
+  /// file and move the caret to its line. Runs at once on press so
+  /// the content never flashes the wrong file.
+  pub(crate) fn jump_to_issue(&mut self, index: usize) {
+    let Some(item) = self.warn_items.get(index) else {
+      return;
+    };
+    let (file, line) = (item.file, item.line);
+    if file >= self.warn_files.len() {
+      return;
+    }
+    self.selected_warn = index;
+    self.nav_tab.set(0);
+    self.nav_tabs.set_selected(0);
+    self.sidebar.select(file);
+    if let Some(page) = self.sidebar.page_mut(file) {
+      if let Some(ed) = page.as_any_mut().downcast_mut::<CodeEditor>() {
+        ed.goto_line(line);
+      }
+    }
+  }
+
+  /// Active navigator tab (`0` files, `1` warnings).
+  pub fn nav_index(&self) -> usize {
+    self.nav_tab.get()
   }
 
   fn refresh_code_ibeam(&mut self) {
@@ -374,6 +523,47 @@ impl EditorUi {
     self.chev.set_focused(focused);
     self.inspector.set_theme(theme.mode, theme.glass);
     self.inspector.set_focused(focused);
+    self.nav_tabs.set_theme(palette.accent, dark);
+    self.nav_tabs.set_focused(focused);
+    self.warn_bg.set_fill(ShapeFill::Solid(palette.accent));
+    self.warn_bg.set_focused(focused);
+    // Warning rows: the jumped-to row shows white text and icon on
+    // the accent fill, the rest follow the theme with tinted icons.
+    for (index, row) in self.warn_rows.iter_mut().enumerate() {
+      let selected = index == self.selected_warn;
+      let tint = self.warn_items.get(index).map(|item| item.tint());
+      if let Some(symbol) = row.child_mut::<SFSymbolImage>(0) {
+        if selected {
+          symbol.set_color(Some(Color::WHITE));
+        } else {
+          symbol.set_color(tint);
+          symbol.set_theme(palette.text, dark);
+        }
+        symbol.set_focused(focused);
+      }
+      if let Some(texts) = row.child_mut::<VStack>(1) {
+        if let Some(title) = texts.child_mut::<BasicText>(0) {
+          if selected {
+            title.set_foreground(TextForeground::Color(Color::WHITE));
+          } else {
+            title.set_foreground(TextForeground::Primary);
+            title.set_theme(theme.mode);
+          }
+          title.set_focused(focused);
+        }
+        if let Some(sub) = texts.child_mut::<BasicText>(1) {
+          if selected {
+            sub.set_foreground(TextForeground::Color(Color::from_rgba8(
+              255, 255, 255, 220,
+            )));
+          } else {
+            sub.set_foreground(TextForeground::Secondary);
+            sub.set_theme(theme.mode);
+          }
+          sub.set_focused(focused);
+        }
+      }
+    }
     // Picked menu row reflects on top (label plus glyph, display
     // only, no function).
     if let Some(index) = self.device_sel.take() {
@@ -405,6 +595,53 @@ impl EditorUi {
     let col_w = self.sidebar.width_value();
     let content_x = viewport.x + col_w;
     let content_w = (viewport.width - col_w).max(0.0);
+    // Navigator tab switcher over the blank gap above the file rows.
+    let tabs_w = (col_w - SEARCH_PAD * 2.0).max(0.0);
+    self.nav_tabs.place(
+      fonts,
+      viewport.x + SEARCH_PAD,
+      viewport.y + NAV_TABS_Y,
+      tabs_w,
+      NAV_TABS_H,
+    );
+    self.nav_tabs.draw(scene, fonts, images);
+    // Warnings tab: sidebar background over the file rows plus the
+    // example issue rows with an accent wash behind the jumped-to
+    // row. The content keeps showing the selected file.
+    if self.nav_tab.get() == 1 {
+      let search_top = viewport.y + viewport.height - SEARCH_PAD - SEARCH_H;
+      let bg_y = viewport.y + WARN_TOP - 2.0;
+      let bg = if dark { SIDEBAR_BG_DARK } else { GROUP_BG_LIGHT };
+      let bg = if focused { bg } else { desaturate(bg) };
+      let scale = fonts.scale as f64;
+      let px = |v: f32| v as f64 * scale;
+      scene.fill(
+        Fill::NonZero,
+        Affine::IDENTITY,
+        &Brush::Solid(bg),
+        None,
+        &Rect::new(px(viewport.x), px(bg_y), px(viewport.x + col_w), px(search_top)),
+      );
+      let row_w = col_w - SEARCH_PAD * 2.0 - 12.0;
+      let mut rects = Vec::new();
+      for (index, row) in self.warn_rows.iter_mut().enumerate() {
+        let ry = viewport.y + WARN_TOP + index as f32 * (WARN_ROW_H + WARN_GAP);
+        if index == self.selected_warn {
+          self.warn_bg.place(
+            fonts,
+            viewport.x + SEARCH_PAD,
+            ry,
+            (col_w - SEARCH_PAD * 2.0).max(0.0),
+            WARN_ROW_H,
+          );
+          self.warn_bg.draw(scene, fonts, images);
+        }
+        row.place(fonts, viewport.x + SEARCH_PAD + 6.0, ry, row_w.max(0.0), WARN_ROW_H);
+        row.draw(scene, fonts, images);
+        rects.push((viewport.x + SEARCH_PAD, ry, (col_w - SEARCH_PAD * 2.0).max(0.0), WARN_ROW_H));
+      }
+      self.warn_rects = rects;
+    }
     // Topbar row in the content toolbar zone: the pill centers on
     // the content middle and wraps a compact group (glyph plus gap
     // plus button text plus gap plus chevron) with equal padding,
@@ -519,20 +756,35 @@ impl EditorUi {
     self.device.mouse_move(x as f64, y as f64);
     self.chev.mouse_move(x, y);
     self.inspector.mouse_move(x, y);
+    self.nav_tabs.mouse_move(x as f64, y as f64);
     self.refresh_code_ibeam();
+  }
+
+  fn hit_warn(&self, x: f32, y: f32) -> Option<usize> {
+    if self.nav_tab.get() != 1 {
+      return None;
+    }
+    self.warn_rects.iter().position(|r| {
+      x >= r.0 && x <= r.0 + r.2 && y >= r.1 && y <= r.1 + r.3
+    })
   }
 
   pub fn mouse_down(&mut self, x: f64, y: f64) {
     // Native element feel (press states, selection, resize): clicks
     // trigger no actions, there are no callbacks anywhere. The search
     // only takes focus and typing, it never searches. The inspector
-    // pill only toggles the notes placeholder state.
+    // pill only toggles the bottom panel. A warning press jumps to
+    // its code at once so the content never flashes the wrong file.
     self.sidebar.mouse_down(x, y);
     self.search.mouse_down(x, y);
     self.run_stop.mouse_down(x, y);
     self.device.mouse_down(x, y);
     self.chev.mouse_down(x, y);
     self.inspector.mouse_down(x, y);
+    self.nav_tabs.mouse_down(x, y);
+    if let Some(index) = self.hit_warn(x as f32, y as f32) {
+      self.jump_to_issue(index);
+    }
   }
 
   pub fn mouse_up(&mut self, x: f64, y: f64) {
@@ -543,6 +795,7 @@ impl EditorUi {
     self.device.mouse_up(x, y);
     self.chev.mouse_up(x, y);
     self.inspector.mouse_up(x, y);
+    self.nav_tabs.mouse_up(x, y);
   }
 
   pub fn mouse_wheel(&mut self, dx: f64, dy: f64) {
@@ -581,6 +834,11 @@ impl EditorUi {
     self.menu_glass.set_focused(focused);
     self.chev.set_focused(focused);
     self.inspector.set_focused(focused);
+    self.nav_tabs.set_focused(focused);
+    self.warn_bg.set_focused(focused);
+    for row in self.warn_rows.iter_mut() {
+      row.set_focused(focused);
+    }
   }
 
   /// Bottom panel master switch flipped by the inspector pill.
@@ -758,5 +1016,42 @@ mod tests {
     }
     ui.toggle_panel();
     assert!(ui.panel_open());
+  }
+
+  #[test]
+  fn navigator_starts_on_files_with_five_issues() {
+    let code = example_code("testApp", "test", "arlo");
+    let ui = EditorUi::new("test", code);
+    assert_eq!(ui.nav_index(), 0);
+    assert_eq!(ui.nav_tabs.selected_index(), 0);
+    assert_eq!(ui.warn_items.len(), 5);
+    assert_eq!(ui.warn_rows.len(), 5);
+    // 3 warnings plus 2 errors, all pointing at real rows.
+    let errors = ui.warn_items.iter().filter(|item| item.error).count();
+    assert_eq!(errors, 2);
+  }
+
+  #[test]
+  fn warning_jump_selects_file_and_line() {
+    let code = example_code("testApp", "test", "arlo");
+    let mut ui = EditorUi::new("test", code);
+    // Pretend the warnings tab is open, then jump to the first
+    // issue (file 4, line 36).
+    ui.nav_tab.set(1);
+    ui.jump_to_issue(0);
+    assert_eq!(ui.nav_index(), 0);
+    assert_eq!(ui.sidebar.selected_index(), 4);
+    assert_eq!(ui.selected_warn, 0);
+    let page = ui.sidebar.page_mut(4).expect("page");
+    let ed = page
+      .as_any_mut()
+      .downcast_mut::<CodeEditor>()
+      .expect("code page");
+    let (line, col) = ed.line_col();
+    assert_eq!((line, col), (35, 0));
+    // Out of range jumps never touch the tab.
+    ui.nav_tab.set(1);
+    ui.jump_to_issue(99);
+    assert_eq!(ui.nav_index(), 1);
   }
 }

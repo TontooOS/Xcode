@@ -28,6 +28,13 @@
     "menu.prod": "Build for Production",
     "menu.dev": "Build for Development",
     "menu.utils": "Utilities",
-    "menu.export": "Build & Export"
+    "menu.export": "Build & Export",
+    "nav.files": "Files",
+    "nav.warnings": "Warnings & Errors",
+    "issue.unused_var": "Unused variable `n`",
+    "issue.type_mismatch": "Mismatched types: expected `String`, found `&str`",
+    "issue.trailing_ws": "Trailing whitespace",
+    "issue.unresolved_import": "Unresolved import `HashMap`",
+    "issue.missing_docs": "Missing docs for `tick`"
   }
 }

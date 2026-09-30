@@ -28,6 +28,13 @@
     "menu.prod": "Build für Produktion",
     "menu.dev": "Build für Entwicklung",
     "menu.utils": "Dienstprogramme",
-    "menu.export": "Bauen & Exportieren"
+    "menu.export": "Bauen & Exportieren",
+    "nav.files": "Dateien",
+    "nav.warnings": "Warnungen & Fehler",
+    "issue.unused_var": "Unbenutzte Variable `n`",
+    "issue.type_mismatch": "Typfehler: `String` erwartet, `&str` gefunden",
+    "issue.trailing_ws": "Leerzeichen am Zeilenende",
+    "issue.unresolved_import": "Import `HashMap` nicht gefunden",
+    "issue.missing_docs": "Doku für `tick` fehlt"
   }
 }
