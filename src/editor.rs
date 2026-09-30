@@ -132,6 +132,12 @@ pub struct EditorUi {
   menu_glass: BasicToolbar,
   /// Dead back/forward chevrons at the content left.
   chev: BasicToolbar,
+  /// Notes placeholder pill at the content right (`sidebar.right`):
+  /// hover and press tint only, toggles a state for the later notes
+  /// area, no panel yet.
+  inspector: BasicToolbar,
+  /// Toggled by the inspector pill, reserved for the notes area.
+  notes_open: Rc<Cell<bool>>,
   /// Cached I-beam state for code pages (updated on hover).
   code_ibeam: Cell<bool>,
   watcher: ThemeWatcher,
@@ -200,6 +206,13 @@ impl EditorUi {
     // over the theme in light mode: clear the override once so labels
     // follow `set_theme` (dark `#d8d9d9`, light `#272727`).
     sidebar.set_item_text(None);
+    // Notes placeholder state for the later notes area: the pill
+    // toggles it, no panel exists yet.
+    let notes_open = Rc::new(Cell::new(false));
+    let notes_toggle = notes_open.clone();
+    let inspector =
+      BasicToolbar::from_items(vec![ToolbarItem::icon("sidebar.right")])
+        .on_action(move |_| notes_toggle.set(!notes_toggle.get()));
     Self {
       sidebar,
       search: SearchField::new(lang::t("ed.search")),
@@ -241,6 +254,8 @@ impl EditorUi {
         ToolbarItem::divider(),
         ToolbarItem::icon("chevron.right"),
       ]),
+      inspector,
+      notes_open,
       code_ibeam: Cell::new(false),
       watcher: ThemeWatcher::new(),
       focused: true,
@@ -309,6 +324,8 @@ impl EditorUi {
     self.menu_glass.set_focused(focused);
     self.chev.set_theme(theme.mode, theme.glass);
     self.chev.set_focused(focused);
+    self.inspector.set_theme(theme.mode, theme.glass);
+    self.inspector.set_focused(focused);
     // Picked menu row reflects on top (label plus glyph, display
     // only, no function).
     if let Some(index) = self.device_sel.take() {
@@ -372,6 +389,17 @@ impl EditorUi {
     let (chev_w, _) = self.chev.measure(fonts);
     self.chev.place(fonts, content_x + SEARCH_PAD, viewport.y + 14.0, chev_w, 36.0);
     self.chev.draw(scene, fonts, images);
+    // Notes placeholder pill at the content right: toggles a state
+    // for the later notes area, no panel yet.
+    let (insp_w, _) = self.inspector.measure(fonts);
+    self.inspector.place(
+      fonts,
+      content_x + content_w - SEARCH_PAD - insp_w,
+      viewport.y + 14.0,
+      insp_w,
+      36.0,
+    );
+    self.inspector.draw(scene, fonts, images);
     // Divider between the topbar pills above and the editor below.
     self.top_div.place(fonts, content_x + SEARCH_PAD, viewport.y + 54.0, content_w - SEARCH_PAD * 2.0, 1.0);
     self.top_div.draw(scene, fonts, images);
@@ -433,18 +461,21 @@ impl EditorUi {
     self.run_stop.mouse_move(x, y);
     self.device.mouse_move(x as f64, y as f64);
     self.chev.mouse_move(x, y);
+    self.inspector.mouse_move(x, y);
     self.refresh_code_ibeam();
   }
 
   pub fn mouse_down(&mut self, x: f64, y: f64) {
     // Native element feel (press states, selection, resize): clicks
     // trigger no actions, there are no callbacks anywhere. The search
-    // only takes focus and typing, it never searches.
+    // only takes focus and typing, it never searches. The inspector
+    // pill only toggles the notes placeholder state.
     self.sidebar.mouse_down(x, y);
     self.search.mouse_down(x, y);
     self.run_stop.mouse_down(x, y);
     self.device.mouse_down(x, y);
     self.chev.mouse_down(x, y);
+    self.inspector.mouse_down(x, y);
   }
 
   pub fn mouse_up(&mut self, x: f64, y: f64) {
@@ -454,6 +485,7 @@ impl EditorUi {
     self.run_stop.mouse_up(x, y);
     self.device.mouse_up(x, y);
     self.chev.mouse_up(x, y);
+    self.inspector.mouse_up(x, y);
   }
 
   pub fn mouse_wheel(&mut self, dx: f64, dy: f64) {
@@ -491,6 +523,12 @@ impl EditorUi {
     self.device.set_focused(focused);
     self.menu_glass.set_focused(focused);
     self.chev.set_focused(focused);
+    self.inspector.set_focused(focused);
+  }
+
+  /// Notes placeholder state toggled by the inspector pill.
+  pub fn notes_open(&self) -> bool {
+    self.notes_open.get()
   }
 }
 
@@ -641,5 +679,14 @@ mod tests {
       path.file_name().and_then(|s| s.to_str()),
       Some("computer.png")
     );
+  }
+
+  #[test]
+  fn notes_placeholder_starts_closed() {
+    // The inspector pill toggles a state for the later notes area;
+    // no panel exists yet, so a fresh editor reports closed.
+    let code = example_code("testApp", "test", "arlo");
+    let ui = EditorUi::new("test", code);
+    assert!(!ui.notes_open());
   }
 }

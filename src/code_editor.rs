@@ -22,8 +22,8 @@ use vello::peniko::{Brush, Color, Fill};
 
 use crate::DocumentKit::{SyntaxLang, highlight_syntax as highlight};
 use crate::TontooUI::elements::{
-  Align, BasicText, FormattedText, HStack, Span, TextAlignment,
-  TextForeground, TextStyle, View, VStack,
+  Align, BasicText, FormattedText, HStack, Scrollbar, Span, TextAlignment,
+  TextForeground, TextStyle, View, VStack, SCROLLBAR_W_HOVER,
 };
 use crate::TontooUI::renderer::window::Key;
 use crate::TontooUI::renderer::{FontSystem, ImageLoader};
@@ -219,7 +219,12 @@ struct UndoState {
   sel: bool,
 }
 
-/// Editable code page: TontooUI rows plus caret and selection.
+/// Overlay bar width in logical px. Matches the hover width of the
+/// standard `Scrollbar` so the thumb never covers more than needed.
+pub const CODE_BAR_W: f32 = SCROLLBAR_W_HOVER;
+
+/// Editable code page: TontooUI rows plus caret, selection and the
+/// standard overlay `Scrollbar`.
 pub struct CodeEditor {
   text: String,
   caret: usize,
@@ -234,6 +239,8 @@ pub struct CodeEditor {
   accent: Color,
   rows: VStack,
   rect: (f32, f32, f32, f32),
+  bar: Scrollbar,
+  last_model: (f32, f32),
   pending: Option<(f32, f32)>,
   drag: Option<(f32, f32)>,
   press_time: Option<Instant>,
@@ -259,6 +266,8 @@ impl CodeEditor {
       accent: Color::from_rgb8(0x00, 0x7a, 0xff),
       rows,
       rect: (0.0, 0.0, 0.0, 0.0),
+      bar: Scrollbar::new(),
+      last_model: (-1.0, -1.0),
       pending: None,
       drag: None,
       press_time: None,
@@ -282,10 +291,25 @@ impl CodeEditor {
     }
     self.accent = accent;
     self.mode = mode;
+    self.bar.set_theme(accent, dark);
   }
 
   pub fn set_focused(&mut self, focused: bool) {
     self.focused = focused;
+    self.bar.set_focused(focused);
+  }
+
+  /// Current scroll offset in logical px (`0.0` is the top).
+  pub fn offset(&self) -> f32 {
+    self.bar.offset()
+  }
+
+  pub fn max_offset(&self) -> f32 {
+    self.bar.max_offset()
+  }
+
+  pub fn scrollable(&self) -> bool {
+    self.bar.scrollable()
   }
 
   fn rebuild(&mut self) {
@@ -294,6 +318,70 @@ impl CodeEditor {
 
   fn lines(&self) -> Vec<String> {
     self.text.split('\n').map(|l| l.to_string()).collect()
+  }
+
+  fn content_h(&self) -> f32 {
+    self.lines().len() as f32 * CODE_LINE_H
+  }
+
+  /// True while the pointer is over the overlay bar (same generous
+  /// grab area the `Scrollbar` itself uses). Presses there drive the
+  /// bar and never reach the text underneath.
+  fn over_bar(&self, x: f32, y: f32) -> bool {
+    if !self.bar.scrollable() || self.rect.2 <= 0.0 || self.rect.3 <= 0.0
+    {
+      return false;
+    }
+    let bx = self.rect.0 + self.rect.2 - CODE_BAR_W;
+    x >= bx - 2.0
+      && x <= self.rect.0 + self.rect.2 + 2.0
+      && y >= self.rect.1
+      && y <= self.rect.1 + self.rect.3
+  }
+
+  /// Sync the bar model with the content: `set_content` flashes the
+  /// bar, so it only runs when the model changed (every-frame calls
+  /// would keep the bar awake forever). The bar stays the single
+  /// source of truth for the offset.
+  fn sync_bar(&mut self, fonts: &mut FontSystem) {
+    let model = (self.content_h(), self.rect.3);
+    if model != self.last_model {
+      self.last_model = model;
+      self.bar.set_content(model.0, model.1);
+    }
+    let bw = CODE_BAR_W.min(self.rect.2).max(0.0);
+    self.bar.set_rect(
+      self.rect.0 + (self.rect.2 - bw).max(0.0),
+      self.rect.1,
+      bw,
+      self.rect.3,
+    );
+    let content_h = model.0.max(self.rect.3);
+    self.rows.place(
+      fonts,
+      self.rect.0,
+      self.rect.1 - self.bar.offset(),
+      self.rect.2,
+      content_h,
+    );
+  }
+
+  /// Keep the caret visible inside the viewport.
+  fn track_caret(&mut self) {
+    let (line, _) = self.line_col();
+    let top = line as f32 * CODE_LINE_H;
+    let offset = self.bar.offset();
+    if top - offset < 0.0 {
+      self.bar.set_offset(top.max(0.0));
+    } else if top + CODE_LINE_H - offset > self.rect.3 {
+      self.bar.set_offset((top + CODE_LINE_H - self.rect.3).max(0.0));
+    }
+  }
+
+  /// Wheel scroll in logical px (down positive, like the shell).
+  /// The bar clamps and flashes; rows re-place on the next draw.
+  pub fn scroll(&mut self, dx: f64, dy: f64) {
+    self.bar.mouse_wheel(dx, dy);
   }
 
   fn line_col(&self) -> (usize, usize) {
@@ -350,6 +438,7 @@ impl CodeEditor {
     self.anchor = state.anchor.min(self.text.len());
     self.sel = state.sel && self.anchor != self.caret;
     self.rebuild();
+    self.track_caret();
   }
 
   pub fn undo_edit(&mut self) -> bool {
@@ -391,6 +480,7 @@ impl CodeEditor {
     self.anchor = 0;
     self.caret = self.text.len();
     self.sel = !self.text.is_empty();
+    self.track_caret();
   }
 
   fn collapse(&mut self) {
@@ -452,10 +542,12 @@ impl CodeEditor {
     self.anchor = self.caret;
     self.sel = false;
     self.rebuild();
+    self.track_caret();
   }
 
   fn backspace(&mut self) {
     if self.delete_selection() {
+      self.track_caret();
       return;
     }
     let caret = self.caret.min(self.text.len());
@@ -472,6 +564,7 @@ impl CodeEditor {
     self.caret = prev;
     self.anchor = prev;
     self.rebuild();
+    self.track_caret();
   }
 
   fn step_left(&mut self, extend: bool) {
@@ -479,6 +572,7 @@ impl CodeEditor {
       if let Some((a, _)) = self.selection_range() {
         self.caret = a;
         self.collapse();
+        self.track_caret();
         return;
       }
       let caret = self.caret.min(self.text.len());
@@ -490,6 +584,7 @@ impl CodeEditor {
           .unwrap_or(0);
       }
       self.collapse();
+      self.track_caret();
       return;
     }
     if !self.sel {
@@ -504,6 +599,7 @@ impl CodeEditor {
         .unwrap_or(0);
     }
     self.sel = self.anchor != self.caret;
+    self.track_caret();
   }
 
   fn step_right(&mut self, extend: bool) {
@@ -511,6 +607,7 @@ impl CodeEditor {
       if let Some((_, b)) = self.selection_range() {
         self.caret = b;
         self.collapse();
+        self.track_caret();
         return;
       }
       let caret = self.caret.min(self.text.len());
@@ -523,6 +620,7 @@ impl CodeEditor {
           .unwrap_or(self.text.len());
       }
       self.collapse();
+      self.track_caret();
       return;
     }
     if !self.sel {
@@ -538,6 +636,7 @@ impl CodeEditor {
         .unwrap_or(self.text.len());
     }
     self.sel = self.anchor != self.caret;
+    self.track_caret();
   }
 
   fn move_up_down_simple(&mut self, up: bool, extend: bool) {
@@ -560,6 +659,7 @@ impl CodeEditor {
     } else {
       self.collapse();
     }
+    self.track_caret();
   }
 
   fn caret_at_point(
@@ -569,7 +669,7 @@ impl CodeEditor {
     y: f32,
   ) -> usize {
     let lines = self.lines();
-    let rel = (y - self.rect.1).max(0.0);
+    let rel = (y - self.rect.1 + self.bar.offset()).max(0.0);
     let line = ((rel / CODE_LINE_H) as usize).min(lines.len() - 1);
     let code_x = self.rect.0 + CODE_GUTTER_W + CODE_GAP;
     let goal = (x - code_x).max(0.0);
@@ -589,6 +689,7 @@ impl CodeEditor {
         self.anchor = a;
         self.caret = b;
         self.sel = true;
+        self.track_caret();
         return;
       }
     } else {
@@ -597,19 +698,26 @@ impl CodeEditor {
     self.caret = caret;
     self.anchor = caret;
     self.sel = false;
+    self.track_caret();
   }
 
   fn finish_drag(&mut self, caret: usize) {
     self.caret = caret.min(self.text.len());
     self.sel = self.anchor != self.caret;
+    self.track_caret();
   }
 
-  /// Press handling: click inside arms a focus plus caret resolve
-  /// on the next draw (caret mapping needs fonts); outside
+  /// Press handling: presses over the overlay bar drive the bar
+  /// and never reach the text; clicks inside arm a focus plus caret
+  /// resolve on the next draw (caret mapping needs fonts); outside
   /// unfocuses at once.
   pub fn press(&mut self, x: f64, y: f64) {
+    self.bar.mouse_down(x, y);
     let (x, y) = (x as f32, y as f32);
     let (rx, ry, rw, rh) = self.rect;
+    if self.over_bar(x, y) {
+      return;
+    }
     if x >= rx && x <= rx + rw && y >= ry && y <= ry + rh {
       self.selected = true;
       self.pressing = true;
@@ -687,7 +795,7 @@ impl View for CodeEditor {
     height: f32,
   ) {
     self.rect = (x, y, width, height);
-    self.rows.place(fonts, x, y, width, height);
+    self.sync_bar(fonts);
   }
 
   fn draw(
@@ -708,6 +816,9 @@ impl View for CodeEditor {
         self.finish_drag(caret);
       }
     }
+    // Re-sync every frame: wheel and thumb drags change the offset
+    // without a new place call, and the text may have grown.
+    self.sync_bar(fonts);
     for index in 0..self.rows.len() {
       if let Some(row) = self.rows.child_mut::<HStack>(index) {
         if let Some(gutter) = row.child_mut::<BasicText>(0) {
@@ -720,9 +831,15 @@ impl View for CodeEditor {
         }
       }
     }
-    self.rows.draw(scene, fonts, images);
     let scale = fonts.scale as f64;
     let px = |v: f32| v as f64 * scale;
+    let (rx, ry, rw, rh) = self.rect;
+    if rw <= 0.0 || rh <= 0.0 {
+      return;
+    }
+    let clip = Rect::new(px(rx), px(ry), px(rx + rw), px(ry + rh));
+    scene.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &clip);
+    self.rows.draw(scene, fonts, images);
     // Selection wash, segmented per line.
     if let Some((sa, sb)) = self.selection_range() {
       let wash = {
@@ -734,6 +851,7 @@ impl View for CodeEditor {
           (c.a as f32 * CODE_SELECTION_ALPHA).round() as u8,
         )
       };
+      let offset = self.bar.offset();
       let lines = self.lines();
       let mut start = 0usize;
       for (index, line) in lines.iter().enumerate() {
@@ -746,20 +864,25 @@ impl View for CodeEditor {
           {
             let x0 = advance_of(fonts, before);
             let x1 = advance_of(fonts, within);
-            let cy = self.rect.1 + index as f32 * CODE_LINE_H;
-            let cx = self.rect.0 + CODE_GUTTER_W + CODE_GAP;
-            scene.fill(
-              Fill::NonZero,
-              Affine::IDENTITY,
-              &Brush::Solid(wash),
-              None,
-              &Rect::new(
-                px(cx + x0),
-                px(cy + 1.0),
-                px(cx + x1),
-                px(cy + CODE_LINE_H - 3.0),
-              ),
-            );
+            let cy =
+              self.rect.1 + index as f32 * CODE_LINE_H - offset;
+            if cy + CODE_LINE_H >= self.rect.1
+              && cy <= self.rect.1 + self.rect.3
+            {
+              let cx = self.rect.0 + CODE_GUTTER_W + CODE_GAP;
+              scene.fill(
+                Fill::NonZero,
+                Affine::IDENTITY,
+                &Brush::Solid(wash),
+                None,
+                &Rect::new(
+                  px(cx + x0),
+                  px(cy + 1.0),
+                  px(cx + x1),
+                  px(cy + CODE_LINE_H - 3.0),
+                ),
+              );
+            }
           }
         }
         start = end + 1;
@@ -772,38 +895,47 @@ impl View for CodeEditor {
       let prefix = current.get(..col.min(current.len())).unwrap_or("");
       let cx =
         self.rect.0 + CODE_GUTTER_W + CODE_GAP + advance_of(fonts, prefix);
-      let cy = self.rect.1 + line as f32 * CODE_LINE_H;
-      let accent = if self.focused {
-        self.accent
-      } else {
-        Color::from_rgb8(0x9a, 0x9a, 0x9e)
-      };
-      scene.fill(
-        Fill::NonZero,
-        Affine::IDENTITY,
-        &Brush::Solid(accent),
-        None,
-        &Rect::new(
-          px(cx),
-          px(cy + 1.0),
-          px(cx + CODE_CARET_W),
-          px(cy + CODE_LINE_H - 3.0),
-        ),
-      );
+      let cy =
+        self.rect.1 + line as f32 * CODE_LINE_H - self.bar.offset();
+      if cy + CODE_LINE_H >= self.rect.1
+        && cy <= self.rect.1 + self.rect.3
+      {
+        let accent = if self.focused {
+          self.accent
+        } else {
+          Color::from_rgb8(0x9a, 0x9a, 0x9e)
+        };
+        scene.fill(
+          Fill::NonZero,
+          Affine::IDENTITY,
+          &Brush::Solid(accent),
+          None,
+          &Rect::new(
+            px(cx),
+            px(cy + 1.0),
+            px(cx + CODE_CARET_W),
+            px(cy + CODE_LINE_H - 3.0),
+          ),
+        );
+      }
     }
+    scene.pop_layer();
+    self.bar.draw(scene, fonts, images);
   }
 
   fn mouse_down(&mut self, x: f64, y: f64) {
     self.press(x, y);
   }
 
-  fn mouse_up(&mut self, _x: f64, _y: f64) {
+  fn mouse_up(&mut self, x: f64, y: f64) {
+    self.bar.mouse_up(x, y);
     self.pressing = false;
     self.pending = None;
     self.drag = None;
   }
 
   fn set_hover(&mut self, x: f32, y: f32) {
+    self.bar.mouse_move(x as f64, y as f64);
     let (rx, ry, rw, rh) = self.rect;
     self.hovered = x >= rx && x <= rx + rw && y >= ry && y <= ry + rh;
     if self.pressing && self.selected {
@@ -817,6 +949,10 @@ impl View for CodeEditor {
 
   fn key(&mut self, key: Key) -> bool {
     self.press_key(key)
+  }
+
+  fn mouse_wheel(&mut self, dx: f64, dy: f64) {
+    self.scroll(dx, dy);
   }
 
   fn as_any_mut(&mut self) -> &mut dyn Any {
@@ -911,5 +1047,45 @@ mod tests {
     assert_eq!(ed.selected_text(), "b");
     assert!(ed.press_key(Key::SelectRight));
     assert_eq!(ed.selected_text(), "bc");
+  }
+
+  #[test]
+  fn wheel_scrolls_and_clamps() {
+    let text = (0..100).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+    let mut ed = CodeEditor::new(text);
+    ed.rect = (0.0, 0.0, 300.0, 200.0);
+    ed.bar.set_content(ed.content_h(), 200.0);
+    assert_eq!(ed.offset(), 0.0);
+    ed.scroll(0.0, -100.0);
+    assert!(ed.offset() > 0.0);
+    let max = ed.max_offset();
+    assert!(max > 0.0);
+    ed.scroll(0.0, -100000.0);
+    assert_eq!(ed.offset(), max);
+    ed.scroll(0.0, 100000.0);
+    assert_eq!(ed.offset(), 0.0);
+  }
+
+  #[test]
+  fn caret_tracking_keeps_last_line_visible() {
+    let text = (0..100).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+    let mut ed = CodeEditor::new(text);
+    ed.rect = (0.0, 0.0, 300.0, 200.0);
+    ed.bar.set_content(ed.content_h(), 200.0);
+    ed.selected = true;
+    ed.caret = ed.text_value().len();
+    ed.anchor = ed.caret;
+    ed.sel = false;
+    ed.track_caret();
+    assert_eq!(ed.offset(), ed.max_offset());
+  }
+
+  #[test]
+  fn bar_hides_when_content_fits() {
+    let mut ed = CodeEditor::new("hi".to_string());
+    ed.rect = (0.0, 0.0, 300.0, 200.0);
+    ed.bar.set_content(ed.content_h(), 200.0);
+    assert!(!ed.scrollable());
+    assert_eq!(ed.max_offset(), 0.0);
   }
 }
