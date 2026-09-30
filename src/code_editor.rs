@@ -13,8 +13,9 @@
 //! stay in memory only.
 
 use std::any::Any;
+use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use vello::Scene;
 use vello::kurbo::{Affine, Circle, Line, Rect, Stroke};
@@ -51,6 +52,8 @@ pub const CODE_UNDO_LIMIT: usize = 100;
 pub const CODE_SELECTION_ALPHA: f32 = 0.3;
 /// Double-click gap in seconds for word select.
 pub const CODE_DOUBLE_TAP_SECONDS: f64 = 0.4;
+/// Auto-save delay after the last keystroke (real files only).
+pub const AUTOSAVE_DELAY: Duration = Duration::from_millis(400);
 
 /// 40-line Rust hello example naming file, project and user.
 pub fn example_rust_code(file: &str, project: &str, user: &str) -> String {
@@ -335,9 +338,19 @@ pub const DIAG_DOT_R: f32 = 4.5;
 
 /// Editable code page: TontooUI rows plus caret, selection, the
 /// standard overlay `Scrollbar` and a collapsible bottom panel with
-/// empty performance stats and logs placeholders.
+/// empty performance stats and logs placeholders. Real project files
+/// load their content from disk and auto-save 400ms after typing
+/// stops; folders and binary files are read-only placeholders.
 pub struct CodeEditor {
   text: String,
+  /// Backing file on disk (`None` for memory-only example pages).
+  file: Option<PathBuf>,
+  /// Read-only pages (folders, binary files) ignore all edits.
+  read_only: bool,
+  /// Unsaved changes since the last write.
+  dirty: bool,
+  /// Last keystroke time for the 400ms auto-save delay.
+  last_edit: Option<Instant>,
   caret: usize,
   anchor: usize,
   sel: bool,
@@ -398,6 +411,10 @@ impl CodeEditor {
     let rows = build_rows(&initial, true);
     Self {
       text: initial,
+      file: None,
+      read_only: false,
+      dirty: false,
+      last_edit: None,
       caret,
       anchor: caret,
       sel: false,
@@ -440,6 +457,71 @@ impl CodeEditor {
 
   pub fn text_value(&self) -> &str {
     &self.text
+  }
+
+  /// Bind a backing file: `read_only` pages (folders, binary files)
+  /// ignore all edits and never write. Clears pending dirty state.
+  pub fn set_file(&mut self, file: Option<PathBuf>, read_only: bool) {
+    self.file = file;
+    self.read_only = read_only;
+    self.dirty = false;
+    self.last_edit = None;
+  }
+
+  pub fn file_path(&self) -> Option<PathBuf> {
+    self.file.clone()
+  }
+
+  pub fn is_read_only(&self) -> bool {
+    self.read_only
+  }
+
+  pub fn is_dirty(&self) -> bool {
+    self.dirty
+  }
+
+  /// Mark the buffer edited: dirty plus keystroke time for the 400ms
+  /// auto-save delay. No-op on read-only pages.
+  fn mark_edited(&mut self) {
+    if self.read_only {
+      return;
+    }
+    self.dirty = true;
+    self.last_edit = Some(Instant::now());
+  }
+
+  /// Write the buffer to its backing file now. Returns true on
+  /// success; keeps the dirty flag on I/O errors so the next poll
+  /// retries. No-op (false) without a file or on read-only pages.
+  pub fn save_now(&mut self) -> bool {
+    let Some(path) = self.file.clone() else {
+      return false;
+    };
+    if self.read_only {
+      return false;
+    }
+    match std::fs::write(&path, self.text.as_bytes()) {
+      Ok(()) => {
+        self.dirty = false;
+        true
+      }
+      Err(err) => {
+        eprintln!("xcode: cannot save {}: {err}", path.display());
+        false
+      }
+    }
+  }
+
+  /// Auto-save once 400ms passed since the last keystroke. Called
+  /// with every frame; returns true when a write happened.
+  pub fn poll_autosave(&mut self) -> bool {
+    if !self.dirty || self.read_only || self.file.is_none() {
+      return false;
+    }
+    match self.last_edit {
+      Some(at) if at.elapsed() >= AUTOSAVE_DELAY => self.save_now(),
+      _ => false,
+    }
   }
 
   pub fn wants_text_cursor(&self) -> bool {
@@ -670,20 +752,28 @@ impl CodeEditor {
   }
 
   pub fn undo_edit(&mut self) -> bool {
+    if self.read_only {
+      return false;
+    }
     let Some(top) = self.undo.pop() else {
       return false;
     };
     self.redo.push(self.snapshot());
     self.restore(top);
+    self.mark_edited();
     true
   }
 
   pub fn redo_edit(&mut self) -> bool {
+    if self.read_only {
+      return false;
+    }
     let Some(top) = self.redo.pop() else {
       return false;
     };
     self.undo.push(self.snapshot());
     self.restore(top);
+    self.mark_edited();
     true
   }
 
@@ -717,6 +807,9 @@ impl CodeEditor {
   }
 
   fn delete_selection(&mut self) -> bool {
+    if self.read_only {
+      return false;
+    }
     let Some((a, b)) = self.selection_range() else {
       return false;
     };
@@ -726,6 +819,7 @@ impl CodeEditor {
     self.anchor = a;
     self.sel = false;
     self.rebuild();
+    self.mark_edited();
     true
   }
 
@@ -739,6 +833,9 @@ impl CodeEditor {
   }
 
   pub fn cut_selection(&mut self) -> bool {
+    if self.read_only {
+      return false;
+    }
     if !self.copy_selection() {
       return false;
     }
@@ -746,12 +843,18 @@ impl CodeEditor {
   }
 
   pub fn paste_clipboard(&mut self) {
+    if self.read_only {
+      return;
+    }
     if let Some(text) = clipboard_get() {
       self.insert(&text);
     }
   }
 
   fn insert(&mut self, content: &str) {
+    if self.read_only {
+      return;
+    }
     let clean: String = content
       .chars()
       .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
@@ -771,9 +874,13 @@ impl CodeEditor {
     self.sel = false;
     self.rebuild();
     self.track_caret();
+    self.mark_edited();
   }
 
   fn backspace(&mut self) {
+    if self.read_only {
+      return;
+    }
     if self.delete_selection() {
       self.track_caret();
       return;
@@ -793,6 +900,7 @@ impl CodeEditor {
     self.anchor = prev;
     self.rebuild();
     self.track_caret();
+    self.mark_edited();
   }
 
   fn step_left(&mut self, extend: bool) {
@@ -1010,18 +1118,34 @@ impl CodeEditor {
     }
   }
 
-  /// Type text at the caret while focused.
+  /// Type text at the caret while focused. Read-only pages ignore
+  /// all input.
   pub fn type_text(&mut self, content: &str) {
+    if self.read_only {
+      return;
+    }
     if self.selected {
       self.insert(content);
     }
   }
 
   /// Key handling while focused: editing, selection, clipboard,
-  /// undo and redo. Returns true when consumed.
+  /// undo and redo. Returns true when consumed. Read-only pages keep
+  /// navigation and copy but block every mutation.
   pub fn press_key(&mut self, key: Key) -> bool {
     if !self.selected {
       return false;
+    }
+    if self.read_only {
+      match key {
+        Key::Backspace
+        | Key::Enter
+        | Key::Cut
+        | Key::Paste
+        | Key::Undo
+        | Key::Redo => return false,
+        _ => {}
+      }
     }
     match key {
       Key::Backspace => self.backspace(),
@@ -1904,5 +2028,70 @@ mod tests {
     let x = rich_advance(&mut fonts, line, true, mid);
     let hit = col_at_x(&mut fonts, line, true, x);
     assert!((hit as isize - mid as isize).abs() <= 1);
+  }
+
+  #[test]
+  fn edits_mark_dirty_without_saving_at_once() {
+    let mut ed = CodeEditor::new("hi".to_string());
+    assert!(!ed.is_dirty());
+    ed.selected = true;
+    ed.type_text("!");
+    assert!(ed.is_dirty());
+    assert!(!ed.poll_autosave());
+    assert_eq!(ed.text_value(), "hi!");
+  }
+
+  #[test]
+  fn save_now_writes_bound_file() {
+    let dir = std::env::temp_dir()
+      .join(format!("xcode-save-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("a.txt");
+    std::fs::write(&path, "old").unwrap();
+    let mut ed = CodeEditor::new("old".to_string());
+    ed.set_file(Some(path.clone()), false);
+    ed.selected = true;
+    ed.type_text(" new");
+    assert!(ed.is_dirty());
+    assert!(ed.save_now());
+    assert!(!ed.is_dirty());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "old new");
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  #[test]
+  fn autosave_fires_after_delay() {
+    let dir = std::env::temp_dir()
+      .join(format!("xcode-autosave-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("a.txt");
+    std::fs::write(&path, "old").unwrap();
+    let mut ed = CodeEditor::new("old".to_string());
+    ed.set_file(Some(path.clone()), false);
+    ed.selected = true;
+    ed.type_text(" new");
+    assert!(!ed.poll_autosave());
+    ed.last_edit = Some(Instant::now() - AUTOSAVE_DELAY);
+    assert!(ed.poll_autosave());
+    assert!(!ed.is_dirty());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "old new");
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  #[test]
+  fn read_only_blocks_edits_and_saves() {
+    let mut ed = CodeEditor::new("hi".to_string());
+    ed.set_file(None, true);
+    assert!(ed.is_read_only());
+    ed.selected = true;
+    ed.type_text("!");
+    assert_eq!(ed.text_value(), "hi");
+    assert!(!ed.is_dirty());
+    assert!(!ed.press_key(Key::Backspace));
+    assert_eq!(ed.text_value(), "hi");
+    assert!(!ed.save_now());
+    assert!(!ed.poll_autosave());
   }
 }

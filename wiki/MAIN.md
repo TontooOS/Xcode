@@ -90,4 +90,5 @@ See [StartPage.md](StartPage.md) for details.
 - 2026-09-30: Panel divider turns 2px accent while hovering or resizing like the sidebar edge, with the resize cursor.
 - 2026-09-30: Notes placeholder pill (`sidebar.right`, round circle) at the content top right (toggles a state for the later notes area, no panel yet); `CodeEditor` scrolls vertically with the wheel plus caret tracking.
 - 2026-09-30: Bottom panel folded away by default with empty placeholders (`panel.no_logs` / `panel.no_metrics` in `lang/en_us.json` and `lang/de_de.json`); metric cells keep CPU/GPU/RAM/Disk/Network labels without graphs, nothing is generated.
+- 2026-09-30: Real editor files (per-row disk content via `load_file_text`, folders and binary files read-only with `ed.binary`, 400ms auto-save after typing stops plus flush on close, still no build or run).
 - 2026-09-30: Nested outline file tree (`BasicOutlineGroup`, trailing chevrons, type icons, remembered state, animated) replacing the flat rows; outline clicks land on flat pages, warning jumps expand ancestors.

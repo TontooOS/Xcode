@@ -1,23 +1,24 @@
-//! Example project editor window for Xcode (separate big window).
+//! Project editor window for Xcode (separate big window).
 //!
 //! A static Xcode-like IDE card built on the `Sidebar` element: working
 //! traffic lights (owned by the sidebar), a dead Run/Stop pill pair at
-//! the sidebar top right (no callbacks), a non-collapsible file
-//! navigator with one preselected file, a functionless search capsule
-//! stretched across the sidebar bottom and editable example Rust code.
-//! Code pages accept clicks and typing like a normal text field;
-//! edits stay in memory only, nothing is ever saved, built or run.
+//! the sidebar top right (no callbacks, nothing is ever built or run),
+//! a non-collapsible file navigator with one preselected file, a
+//! functionless search capsule stretched across the sidebar bottom and
+//! real editable file content. Code pages accept clicks and typing
+//! like a normal text field and auto-save their backing file 400ms
+//! after typing stops; folders and binary files are read-only.
 //!
 //! Handoff without CLI: the starter sets `XCODE_PROJECT_NAME` on a
 //! spawned copy of this binary and closes its own window at once;
 //! `open_project_window` waits ~600ms first (old window visibly
 //! closes, short gap), then opens the 1100x700 editor fresh.
 use std::cell::{Cell, RefCell};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use crate::code_editor::{CodeEditor, example_rust_code};
-use crate::project_files::{FileEntry, list_project_files};
+use crate::project_files::{FileEntry, list_project_files, load_file_text};
 use crate::TontooUI::elements::{
   Align, BasicOutlineGroup, BasicText, BasicToolbar, BarSwitcher,
   BarSwitcherItem, FileImage, HorizontalDivider, HStack, MenuItem,
@@ -148,6 +149,33 @@ pub fn file_stem(display_name: &str) -> String {
 
 fn example_code(file: &str, project: &str, user: &str) -> String {
   example_rust_code(file, project, user)
+}
+
+/// One bound editor page per navigator row: folders open as empty
+/// read-only pages, files load their real text (editable) or a
+/// read-only binary placeholder, memory-only rows without a real
+/// path keep the fallback `code`.
+fn page_for_entry(entry: &FileEntry, code: &str) -> CodeEditor {
+  if entry.path.as_os_str().is_empty() {
+    return CodeEditor::new(code.to_string());
+  }
+  if entry.is_dir {
+    let mut page = CodeEditor::new(String::new());
+    page.set_file(None, true);
+    return page;
+  }
+  match load_file_text(&entry.path) {
+    Some(text) => {
+      let mut page = CodeEditor::new(text);
+      page.set_file(Some(entry.path.clone()), false);
+      page
+    }
+    None => {
+      let mut page = CodeEditor::new(lang::t("ed.binary"));
+      page.set_file(Some(entry.path.clone()), true);
+      page
+    }
+  }
 }
 
 /// File type icon plus tint by extension: `.rs` rust orange, `.proj`
@@ -357,14 +385,16 @@ pub struct EditorUi {
 
 impl EditorUi {
   pub fn new(project: &str, code: String) -> Self {
-    // Built-in example rows (fallback without a project path).
+    // Built-in example rows (fallback without a project path,
+    // memory only, nothing is saved).
     let file = file_stem(project);
+    let empty = PathBuf::new();
     let entries = vec![
-      FileEntry { label: project.to_string(), is_dir: true, depth: 0 },
-      FileEntry { label: "Assets".to_string(), is_dir: true, depth: 1 },
-      FileEntry { label: "ContentView".to_string(), is_dir: false, depth: 1 },
-      FileEntry { label: "Info".to_string(), is_dir: false, depth: 1 },
-      FileEntry { label: file, is_dir: false, depth: 1 },
+      FileEntry { label: project.to_string(), is_dir: true, depth: 0, path: empty.clone() },
+      FileEntry { label: "Assets".to_string(), is_dir: true, depth: 1, path: empty.clone() },
+      FileEntry { label: "ContentView".to_string(), is_dir: false, depth: 1, path: empty.clone() },
+      FileEntry { label: "Info".to_string(), is_dir: false, depth: 1, path: empty.clone() },
+      FileEntry { label: file, is_dir: false, depth: 1, path: empty },
     ];
     let warn_specs = vec![
       (false, lang::t("issue.unused_var"), 4, 36),
@@ -376,9 +406,11 @@ impl EditorUi {
     Self::from_entries(entries, code, FILE_INDEX, warn_specs)
   }
 
-  /// Open a real project root: every row owns an identical example
-  /// page (clicks stay no-ops), the first `.rs` row is preselected
-  /// and carries the example warnings.
+  /// Open a real project root: every file row loads its real text
+  /// content (binary and oversized files open read-only), folders
+  /// open as empty read-only pages. The first `.rs` row is
+  /// preselected. Text edits auto-save 400ms after typing stops;
+  /// nothing is ever built or run.
   pub fn open(project: &str, root: &Path) -> Result<Self, String> {
     if !root.is_dir() {
       return Err(format!("missing project dir: {}", root.display()));
@@ -407,8 +439,10 @@ impl EditorUi {
   }
 
   /// Shared constructor from walker entries: flat sidebar rows plus
-  /// example pages, warning names plus specs, and the nested outline
-  /// tree mapping flat rows to outline paths.
+  /// one bound page per row (real file text, read-only folders and
+  /// binary placeholders), warning names plus specs, and the nested
+  /// outline tree mapping flat rows to outline paths. `code` is the
+  /// fallback text for memory-only rows without a real file.
   fn from_entries(
     entries: Vec<FileEntry>,
     code: String,
@@ -426,7 +460,7 @@ impl EditorUi {
       .collect::<Vec<_>>();
     let pages = entries
       .iter()
-      .map(|_| CodeEditor::new(code.clone()))
+      .map(|entry| page_for_entry(entry, &code))
       .collect::<Vec<_>>();
     let warn_files = entries
       .iter()
@@ -630,10 +664,20 @@ impl EditorUi {
     }
   }
 
-  /// Frame clock hook for every page: generates nothing, the
-  /// bottom panel keeps its empty placeholders.
+  /// Frame clock hook for every page: placeholder timing plus the
+  /// 400ms file auto-save. Nothing is built or run.
   fn tick_code_pages(&mut self, now_secs: f64) {
-    self.each_page(|ed| ed.tick(now_secs));
+    self.each_page(|ed| {
+      ed.tick(now_secs);
+      ed.poll_autosave();
+    });
+  }
+
+  /// Write every dirty bound file now (used on quit paths).
+  pub fn save_all_now(&mut self) {
+    self.each_page(|ed| {
+      ed.save_now();
+    });
   }
 
   /// Fold or unfold the bottom panel on every page (the inspector
@@ -694,7 +738,7 @@ impl EditorUi {
     self.nav_tab.get()
   }
 
-  /// Run over every example page (navigator rows own them 1:1).
+  /// Run over every file page (navigator rows own them 1:1).
   fn each_page(&mut self, mut f: impl FnMut(&mut CodeEditor)) {
     for index in 0..self.page_total {
       if let Some(page) = self.sidebar.page_mut(index) {
@@ -999,7 +1043,11 @@ impl EditorUi {
   }
 
   pub fn poll_command(&mut self) -> Option<WindowCommand> {
-    self.command.take()
+    let command = self.command.take()?;
+    if matches!(command, WindowCommand::Close) {
+      self.save_all_now();
+    }
+    Some(command)
   }
 
   /// Hover only: traffic light glyphs, row highlights, pill tints
@@ -1348,6 +1396,83 @@ mod tests {
     for item in &ui.warn_items {
       assert!(item.file < ui.page_total);
     }
+    let _ = std::fs::remove_dir_all(&parent);
+  }
+
+  #[test]
+  fn open_binds_real_file_contents() {
+    let parent = std::env::temp_dir()
+      .join(format!("xcode-bind-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&parent);
+    std::fs::create_dir_all(&parent).unwrap();
+    let root = crate::scaffold::create_project(
+      &parent,
+      "My App",
+      "",
+      "1.0",
+      "de.x",
+    )
+    .expect("scaffold");
+    let entries = crate::project_files::list_project_files(&root);
+    let mut ui = EditorUi::open("My App", &root).expect("open");
+    for (index, entry) in entries.iter().enumerate() {
+      let page = ui.sidebar.page_mut(index).expect("page");
+      let ed = page
+        .as_any_mut()
+        .downcast_mut::<CodeEditor>()
+        .expect("code page");
+      if entry.is_dir {
+        assert!(ed.is_read_only());
+        assert!(ed.file_path().is_none());
+      } else {
+        let disk = crate::project_files::load_file_text(&entry.path);
+        match disk {
+          Some(text) => {
+            assert!(!ed.is_read_only());
+            assert_eq!(ed.file_path(), Some(entry.path.clone()));
+            assert_eq!(ed.text_value(), text);
+          }
+          None => {
+            assert!(ed.is_read_only());
+            assert_eq!(ed.text_value(), crate::lang::t("ed.binary"));
+          }
+        }
+      }
+    }
+    let _ = std::fs::remove_dir_all(&parent);
+  }
+
+  #[test]
+  fn save_all_writes_dirty_pages() {
+    let parent = std::env::temp_dir()
+      .join(format!("xcode-saveall-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&parent);
+    std::fs::create_dir_all(&parent).unwrap();
+    let root = crate::scaffold::create_project(
+      &parent,
+      "My App",
+      "",
+      "1.0",
+      "de.x",
+    )
+    .expect("scaffold");
+    let mut ui = EditorUi::open("My App", &root).expect("open");
+    let sel = ui.sidebar.selected_index();
+    let path = {
+      let page = ui.sidebar.page_mut(sel).expect("page");
+      let ed = page
+        .as_any_mut()
+        .downcast_mut::<CodeEditor>()
+        .expect("code page");
+      assert!(!ed.is_read_only());
+      ed.goto_line(1);
+      ed.type_text("// saved");
+      assert!(ed.is_dirty());
+      ed.file_path().expect("bound file")
+    };
+    ui.save_all_now();
+    let content = std::fs::read_to_string(&path).unwrap();
+    assert!(content.contains("// saved"));
     let _ = std::fs::remove_dir_all(&parent);
   }
 

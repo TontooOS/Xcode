@@ -22,6 +22,7 @@
     "location.title": "Ort wählen:",
     "location.new_folder": "Neuer Ordner:",
     "ed.search": "Suchen",
+    "ed.binary": "Binärdatei, nicht editierbar.",
     "menu.device": "My Computer",
     "menu.devices": "Geräte",
     "menu.build": "Build",

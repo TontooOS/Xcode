@@ -1,16 +1,16 @@
 # Editor
 
-The example project editor is a big 1100x700 window in its own
-process, built on the `Sidebar` element: working traffic lights
-(owned by the sidebar), a dead Run/Stop pill pair, a
-non-collapsible file navigator preselected on the file row, a
+The project editor is a big 1100x700 window in its own process,
+built on the `Sidebar` element: working traffic lights (owned by the
+sidebar), a dead Run/Stop pill pair (nothing is ever built or run),
+a non-collapsible file navigator preselected on the file row, a
 functionless search capsule stretched across the sidebar bottom and
-editable example Rust code.
+real editable file content.
 The element feels alive (hover, press states, selection, resize,
 wheel, search focus and typing); code pages accept clicks and typing
-like a normal text field: no callbacks are registered, all pages
-start identical and nothing is ever saved, built or run. No CLI
-anywhere, no TBuild calls.
+like a normal text field and auto-save their backing file 400ms
+after typing stops: no callbacks are registered, folders and binary
+files open read-only. No CLI anywhere, no TBuild calls.
 
 ## Processes
 
@@ -55,7 +55,7 @@ pages: narrow windows squeeze the code, wide windows use everything.
 | `editor` | `CodeEditor` pages | Editable 40-line Rust hello example through the DocumentKit Rust tokenizer (`highlight` → `Span`s: bold keywords, underlined strings, dimmed italic comments, gaps plain; per line, example code uses no multi-line constructs); gray `Footnote` gutter numbers share the code text size so they stay glued to their lines; lines carrying a warning or error always show a tinted gutter badge, a tinted line number and a matching line wash like the reference (red errors, yellow warnings); spans rebuild on every edit and on theme text change; spans rebuild on every edit and on theme text change; click inside focuses with a caret, drag selects, double-click selects the word, typing replaces the highlight, `Backspace` deletes, `Enter` splits, arrows move (`Shift` extends),   `ESC` unfocuses, `Ctrl+A/C/X/V/Z/Y` selects all, copies, cuts, pastes, undoes and redoes through an in-memory clipboard; caret, click mapping and the selection wash measure through the same rich monospace DocumentKit layout the code rows render with (bold runs included), so the   highlight hugs the letters exactly; caret, click mapping,
   selection, gutter badges and line washes all use the row pitch
   measured from the laid-out rows (never a fixed px guess), so the
-  highlight cannot drift off the lines further down; the wheel scrolls vertically with caret tracking so the caret stays visible; edits stay in memory only. No breadcrumb, no status bar (removed) |
+  highlight cannot drift off the lines further down; the wheel scrolls vertically with caret tracking so the caret stays visible; text edits auto-save the bound file 400ms after typing stops, folders and binary files stay read-only. No breadcrumb, no status bar (removed) |
 | `bottom` | divider + `CodeEditor` panel | Bottom area below the code with a drag divider: folded away by default, click expands or collapses it like a sidebar, dragging resizes it between 100px and 420px (180px default); the divider turns 2px accent while hovering or dragging like the sidebar edge and shows the resize cursor; left `Performance` stats as a divider-free 2x2 grid (CPU top left, GPU top right, RAM bottom left in MB, bottom right split into Disk in MB/s and Network in Mb/s) keeping labels and values with the localized `panel.no_metrics` (`No Performance Metrics`) text where graphs would sit, no graphs; right `Logs` with the localized `panel.no_logs` (`No Logs`) placeholder; nothing is generated, all example only, nothing runs |
 | `status` | page `HStack` | `Filter` (`ed.filter`), `Spacer`, `Line: 1  Col: 1` (`ed.status`) |
 
@@ -74,9 +74,11 @@ following the accent; folders keep `folder.fill`.
 recursive walk with indented display names (two spaces per depth),
 folders first then files, alphabetical; `target` folders, dotfiles
 and dotfolders (including `.git`) plus symlinks are skipped, at most
-500 rows. Every row owns an identical example `CodeEditor` page, so
-clicks are no-ops; the first `.rs` file row is preselected and
-carries the example warnings. Without a valid project path the
+500 rows. Every row owns one bound `CodeEditor` page with its real
+file text (folders empty read-only, binary or oversized files with
+the `ed.binary` placeholder read-only); the first `.rs` file row is
+preselected and carries the example warnings. Without a valid
+project path the
 editor falls back to the built-in example rows. The supervisor hands
 the path over as `OPEN:<name>\t<path>` (env `XCODE_PROJECT_PATH`
 next to `XCODE_PROJECT_NAME`).
@@ -88,10 +90,17 @@ next to `XCODE_PROJECT_NAME`).
   `MyApp`); empty input becomes `MyApp`.
 - The code header reads `Created by {user}` from the OS username.
 - `example_code` returns exactly 40 lines of Rust hello code naming
-  `{file}`, `{project}` and `{user}`.
-- Each of the 5 items owns an identical `CodeEditor` page starting
-  from the same 40-line text; edits stay per page in memory only and
-  are never saved, built or run.
+  `{file}`, `{project}` and `{user}` (fallback rows without a real
+  project path only).
+- Each navigator row owns one bound `CodeEditor` page:
+  `list_project_files` carries the real path per row,
+  `load_file_text` loads text up to 1MB (UTF-8, no NUL byte),
+  `page_for_entry` binds editable pages to their file, folders open
+  as empty read-only pages and binary or oversized files show the
+  localized `ed.binary` placeholder read-only. Text edits mark the
+  page dirty and `poll_autosave` writes the file 400ms after typing
+  stops (`AUTOSAVE_DELAY`); `save_all_now` flushes every page on
+  window close. Nothing is built or run.
 - `CodeEditor` is a custom Xcode element (user-approved: TontooUI has
   no code editor with live highlight, only plain `TextEditor`): it
   reuses TontooUI `BasicText` plus `FormattedText` rows with

@@ -4,19 +4,40 @@
 //! rows: folders first then files, alphabetical, two spaces per
 //! depth. `target` folders, dotfiles/dotfolders (including `.git`)
 //! and symlinks are skipped (cycle safety); at most `MAX_FILES`
-//! rows guard against pathological trees. Clicks on the rows stay
-//! no-ops: every row owns an identical example `CodeEditor` page.
+//! rows guard against pathological trees. Every row carries its real
+//! filesystem path; `load_file_text` loads editable text (up to
+//! `MAX_TEXT_BYTES`, UTF-8 without NUL), anything else opens
+//! read-only.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Max navigator rows.
 pub const MAX_FILES: usize = 500;
+/// Max bytes loaded into the editor (bigger files open read-only).
+pub const MAX_TEXT_BYTES: u64 = 1024 * 1024;
 
-/// One navigator row: indented display name, kind and depth.
+/// One navigator row: indented display name, kind, depth and the real
+/// filesystem path (full path for real projects, empty for fallbacks).
 pub struct FileEntry {
   pub label: String,
   pub is_dir: bool,
   pub depth: usize,
+  pub path: PathBuf,
+}
+
+/// Load a file as editable text: `None` for missing, oversized,
+/// binary (NUL byte) or non-UTF8 files. Callers show a read-only
+/// placeholder instead and never save those.
+pub fn load_file_text(path: &Path) -> Option<String> {
+  let meta = std::fs::metadata(path).ok()?;
+  if !meta.is_file() || meta.len() > MAX_TEXT_BYTES {
+    return None;
+  }
+  let bytes = std::fs::read(path).ok()?;
+  if bytes.contains(&0) {
+    return None;
+  }
+  String::from_utf8(bytes).ok()
 }
 
 /// List `root` for the navigator (see module docs). Empty roots
@@ -30,7 +51,12 @@ pub fn list_project_files(root: &Path) -> Vec<FileEntry> {
       .and_then(|s| s.to_str())
       .unwrap_or("Project")
       .to_string();
-    out.push(FileEntry { label: name, is_dir: true, depth: 0 });
+    out.push(FileEntry {
+      label: name,
+      is_dir: true,
+      depth: 0,
+      path: root.to_path_buf(),
+    });
   }
   out.truncate(MAX_FILES);
   out
@@ -76,17 +102,20 @@ fn walk(dir: &Path, depth: usize, out: &mut Vec<FileEntry>) {
       if name == "target" {
         continue;
       }
+      let full = entry.path();
       out.push(FileEntry {
         label: format!("{}{name}", "  ".repeat(depth)),
         is_dir: true,
         depth,
+        path: full.clone(),
       });
-      walk(&entry.path(), depth + 1, out);
+      walk(&full, depth + 1, out);
     } else {
       out.push(FileEntry {
         label: format!("{}{name}", "  ".repeat(depth)),
         is_dir: false,
         depth,
+        path: entry.path(),
       });
     }
   }
@@ -160,6 +189,41 @@ mod tests {
     let entries = list_project_files(&dir);
     assert_eq!(entries.len(), 1);
     assert!(entries[0].is_dir);
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  #[test]
+  fn entries_carry_real_paths() {
+    let root = scaffold_tree("paths");
+    let entries = list_project_files(&root);
+    let app = entries
+      .iter()
+      .find(|entry| entry.label.trim() == "app.rs")
+      .expect("app.rs");
+    assert!(app.path.is_file());
+    assert_eq!(load_file_text(&app.path).is_some(), true);
+    let src = entries
+      .iter()
+      .find(|entry| entry.label == "src")
+      .expect("src folder");
+    assert_eq!(src.path, root.join("src"));
+    let _ = std::fs::remove_dir_all(root.parent().unwrap());
+  }
+
+  #[test]
+  fn load_file_text_rejects_binary_and_missing() {
+    let dir = std::env::temp_dir()
+      .join(format!("xcode-load-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let text = dir.join("a.txt");
+    std::fs::write(&text, "hello").unwrap();
+    assert_eq!(load_file_text(&text).as_deref(), Some("hello"));
+    let bin = dir.join("b.bin");
+    std::fs::write(&bin, [104, 105, 0, 33]).unwrap();
+    assert_eq!(load_file_text(&bin), None);
+    assert_eq!(load_file_text(&dir.join("missing.txt")), None);
+    assert_eq!(load_file_text(&dir), None);
     let _ = std::fs::remove_dir_all(&dir);
   }
 
