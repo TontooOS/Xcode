@@ -17,9 +17,9 @@ use std::rc::Rc;
 
 use crate::code_editor::{CodeEditor, example_rust_code};
 use crate::TontooUI::elements::{
-  Align, BasicText, BasicToolbar, FileImage, HorizontalDivider, HStack,
-  MenuItem, NestedMenu, RoundedRectangle, SearchField, SFSymbolImage,
-  SegmentedPicker, ShapeFill, Sidebar, SidebarItem,
+  Align, BasicText, BasicToolbar, BarSwitcher, BarSwitcherItem, FileImage,
+  HorizontalDivider, HStack, MenuItem, NestedMenu, RoundedRectangle,
+  SearchField, SFSymbolImage, ShapeFill, Sidebar, SidebarItem,
   TextForeground, TextStyle, ToolbarItem, TrafficAction, View, VStack,
   GROUP_BG_LIGHT, MENU_BTN_PAD_X, MENU_CHEV_GAP, MENU_CHEV_W,
   SIDEBAR_BG_DARK,
@@ -53,13 +53,13 @@ const GLASS_PAD: f32 = 16.0;
 /// the full sidebar column.
 const SEARCH_H: f32 = 28.0;
 const SEARCH_PAD: f32 = 8.0;
-/// Navigator tab switcher geometry: 24px picker in the blank gap
+/// Navigator tab switcher geometry: 36px pill in the blank gap
 /// between the 64px toolbar zone and the file rows at 108px.
-const NAV_TABS_Y: f32 = 70.0;
-const NAV_TABS_H: f32 = 24.0;
+const NAV_TABS_Y: f32 = 66.0;
+const NAV_TABS_H: f32 = 36.0;
 /// Warnings overlay: rows start below the picker, one 52px row per
 /// issue with a 6px gap.
-const WARN_TOP: f32 = 100.0;
+const WARN_TOP: f32 = 106.0;
 const WARN_ROW_H: f32 = 52.0;
 const WARN_GAP: f32 = 6.0;
 const WARN_ICON: f32 = 20.0;
@@ -209,7 +209,7 @@ pub struct EditorUi {
   /// Last applied switch state (divider taps stay per page).
   last_panel_open: Cell<bool>,
   /// Navigator tab switcher (`Files` default, `Warnings & Errors`).
-  nav_tabs: SegmentedPicker,
+  nav_tabs: BarSwitcher,
   /// Active navigator tab, flipped by the picker.
   nav_tab: Rc<Cell<usize>>,
   /// Example navigator issues (3 warnings plus 2 errors).
@@ -299,15 +299,19 @@ impl EditorUi {
     // page, see `apply_panel_open`).
     let panel_open = Rc::new(Cell::new(true));
     let panel_toggle = panel_open.clone();
-    // Navigator tabs: `Files` default plus `Warnings & Errors`. The
-    // switcher overlays the blank gap above the file rows; the
-    // warnings tab covers the rows with the example issue list.
+    // Navigator tabs: `Files` default plus `Warnings & Errors`.
+    // Bar switcher with icon plus label cells in the blank gap
+    // above the file rows; the warnings tab covers the rows with
+    // the example issue list.
     let nav_tab = Rc::new(Cell::new(0));
     let tab_flip = nav_tab.clone();
-    let nav_tabs = SegmentedPicker::from_slice(
-      "",
-      &[&lang::t("nav.files"), &lang::t("nav.warnings")],
-    )
+    let nav_tabs = BarSwitcher::from_items(vec![
+      BarSwitcherItem::both("folder.fill", lang::t("nav.files")),
+      BarSwitcherItem::both(
+        "exclamationmark.triangle.fill",
+        lang::t("nav.warnings"),
+      ),
+    ])
     .selected(0)
     .on_select(move |index| tab_flip.set(index));
     let warn_files = vec![
@@ -400,6 +404,24 @@ impl EditorUi {
         if let Some(ed) = page.as_any_mut().downcast_mut::<CodeEditor>() {
           ed.set_theme(accent, mode, dark);
           ed.set_focused(focused);
+        }
+      }
+    }
+  }
+
+  /// Hand every page its own file diagnostics (line plus
+  /// severity) so marked lines render badge, number and wash.
+  fn sync_diagnostics(&mut self) {
+    for index in 0..5 {
+      let markers: Vec<(usize, bool)> = self
+        .warn_items
+        .iter()
+        .filter(|item| item.file == index)
+        .map(|item| (item.line, item.error))
+        .collect();
+      if let Some(page) = self.sidebar.page_mut(index) {
+        if let Some(ed) = page.as_any_mut().downcast_mut::<CodeEditor>() {
+          ed.set_diagnostics(&markers);
         }
       }
     }
@@ -523,7 +545,7 @@ impl EditorUi {
     self.chev.set_focused(focused);
     self.inspector.set_theme(theme.mode, theme.glass);
     self.inspector.set_focused(focused);
-    self.nav_tabs.set_theme(palette.accent, dark);
+    self.nav_tabs.set_theme(theme.mode, theme.glass);
     self.nav_tabs.set_focused(focused);
     self.warn_bg.set_fill(ShapeFill::Solid(palette.accent));
     self.warn_bg.set_focused(focused);
@@ -578,6 +600,8 @@ impl EditorUi {
     }
     // Code pages follow the theme with live highlight colors.
     self.theme_code_pages(palette.accent, mode, dark, focused);
+    // Diagnostic markers per file (badge, number, wash).
+    self.sync_diagnostics();
     // Fake stats and logs advance with the frame time.
     self.tick_code_pages(time_secs);
     // Apply inspector pill edges to every page (divider taps stay
@@ -756,7 +780,7 @@ impl EditorUi {
     self.device.mouse_move(x as f64, y as f64);
     self.chev.mouse_move(x, y);
     self.inspector.mouse_move(x, y);
-    self.nav_tabs.mouse_move(x as f64, y as f64);
+    self.nav_tabs.mouse_move(x, y);
     self.refresh_code_ibeam();
   }
 
@@ -1016,6 +1040,34 @@ mod tests {
     }
     ui.toggle_panel();
     assert!(ui.panel_open());
+  }
+
+  #[test]
+  fn diagnostics_reach_their_pages() {
+    let code = example_code("testApp", "test", "arlo");
+    let mut ui = EditorUi::new("test", code);
+    ui.sync_diagnostics();
+    // File 4 carries 4 markers (error on line 33), file 2 one.
+    let page = ui.sidebar.page_mut(4).expect("page");
+    let ed = page
+      .as_any_mut()
+      .downcast_mut::<CodeEditor>()
+      .expect("code page");
+    assert_eq!(ed.marker_at(33), Some(true));
+    assert_eq!(ed.marker_at(36), Some(false));
+    assert_eq!(ed.marker_at(1), None);
+    let page = ui.sidebar.page_mut(2).expect("page");
+    let ed = page
+      .as_any_mut()
+      .downcast_mut::<CodeEditor>()
+      .expect("code page");
+    assert_eq!(ed.marker_at(1), Some(true));
+    let page = ui.sidebar.page_mut(0).expect("page");
+    let ed = page
+      .as_any_mut()
+      .downcast_mut::<CodeEditor>()
+      .expect("code page");
+    assert_eq!(ed.marker_at(1), None);
   }
 
   #[test]

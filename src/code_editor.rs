@@ -17,7 +17,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use vello::Scene;
-use vello::kurbo::{Affine, BezPath, Cap, Join, Line, Rect, Stroke};
+use vello::kurbo::{Affine, BezPath, Cap, Circle, Join, Line, Rect, Stroke};
 use vello::peniko::{Brush, Color, Fill};
 
 use crate::DocumentKit::{SyntaxLang, highlight_syntax as highlight};
@@ -333,6 +333,14 @@ pub const STAT_GPU: Color = Color::from_rgb8(0xbf, 0x5a, 0xf2);
 pub const STAT_RAM: Color = Color::from_rgb8(0x30, 0xd1, 0x58);
 pub const STAT_DISK: Color = Color::from_rgb8(0xff, 0x9f, 0x0a);
 pub const STAT_NET: Color = Color::from_rgb8(0x64, 0xd2, 0xff);
+/// Diagnostic gutter and wash colors (match the navigator tints).
+pub const DIAG_ERROR: Color = Color::from_rgb8(0xff, 0x3b, 0x30);
+pub const DIAG_WARN: Color = Color::from_rgb8(0xff, 0xcc, 0x00);
+/// Line wash alphas (0-1 of the marker color).
+pub const DIAG_ERROR_WASH: f32 = 0.16;
+pub const DIAG_WARN_WASH: f32 = 0.24;
+/// Gutter badge radius in logical px.
+pub const DIAG_DOT_R: f32 = 4.5;
 
 /// Editable code page: TontooUI rows plus caret, selection, the
 /// standard overlay `Scrollbar` and a collapsible bottom panel with
@@ -387,6 +395,9 @@ pub struct CodeEditor {
   last_tick: f64,
   /// Last hover point for wheel routing.
   last_hover: (f32, f32),
+  /// Diagnostic markers: 1-based line plus severity (`true` error,
+  /// `false` warning), sorted and deduplicated with error winning.
+  markers: Vec<(usize, bool)>,
 }
 
 impl CodeEditor {
@@ -432,6 +443,7 @@ impl CodeEditor {
       tick_count: 0,
       last_tick: 0.0,
       last_hover: (-1.0, -1.0),
+      markers: Vec::new(),
     }
   }
 
@@ -932,6 +944,36 @@ impl CodeEditor {
     self.track_caret();
   }
 
+  /// Replace the diagnostic markers (1-based line plus severity).
+  /// Sorted and deduplicated with error winning; drawing reads them
+  /// every frame, so no rebuild is needed.
+  pub fn set_diagnostics(&mut self, markers: &[(usize, bool)]) {
+    let mut sorted: Vec<(usize, bool)> = markers
+      .iter()
+      .filter(|(line, _)| *line >= 1)
+      .copied()
+      .collect();
+    sorted.sort();
+    let mut out = Vec::with_capacity(sorted.len());
+    for (line, error) in sorted {
+      if let Some(last) = out.last_mut() {
+        let prev: &mut (usize, bool) = last;
+        if prev.0 == line {
+          prev.1 = prev.1 || error;
+          continue;
+        }
+      }
+      out.push((line, error));
+    }
+    self.markers = out;
+  }
+
+  /// Severity at a 1-based line (`Some(true)` error, `Some(false)`
+  /// warning, `None` clean).
+  pub(crate) fn marker_at(&self, line: usize) -> Option<bool> {
+    self.markers.iter().find(|(no, _)| *no == line).map(|(_, e)| *e)
+  }
+
   /// Press handling: presses over a scrollbar drive that bar and
   /// never reach the text; presses on the divider arm a resize (a
   /// tap toggles the panel like a sidebar); clicks inside the code
@@ -1333,8 +1375,15 @@ impl View for CodeEditor {
     // without a new place call, and the text may have grown.
     self.sync_bar(fonts);
     for index in 0..self.rows.len() {
+      let mark = self.marker_at(index + 1);
       if let Some(row) = self.rows.child_mut::<HStack>(index) {
         if let Some(gutter) = row.child_mut::<BasicText>(0) {
+          // Marked lines keep a tinted number in both themes.
+          match mark {
+            Some(true) => gutter.set_foreground(TextForeground::Color(DIAG_ERROR)),
+            Some(false) => gutter.set_foreground(TextForeground::Color(DIAG_WARN)),
+            None => gutter.set_foreground(TextForeground::Secondary),
+          }
           gutter.set_theme(self.mode);
           gutter.set_focused(self.focused);
         }
@@ -1352,7 +1401,45 @@ impl View for CodeEditor {
     }
     let clip = Rect::new(px(code.0), px(code.1), px(code.0 + code.2), px(code.1 + code.3));
     scene.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &clip);
+    // Diagnostic line washes under the text (visible marked lines
+    // only, full code width).
+    let offset = self.bar.offset();
+    for (line, error) in self.markers.clone() {
+      let cy = code.1 + (line as f32 - 1.0) * CODE_LINE_H - offset;
+      if cy + CODE_LINE_H < code.1 || cy > code.1 + code.3 {
+        continue;
+      }
+      let base = if error { DIAG_ERROR } else { DIAG_WARN };
+      let alpha = if error { DIAG_ERROR_WASH } else { DIAG_WARN_WASH };
+      let c = base.to_rgba8();
+      scene.fill(
+        Fill::NonZero,
+        Affine::IDENTITY,
+        &Brush::Solid(Color::from_rgba8(c.r, c.g, c.b, (c.a as f32 * alpha).round() as u8)),
+        None,
+        &Rect::new(px(code.0), px(cy), px(code.0 + code.2), px(cy + CODE_LINE_H)),
+      );
+    }
     self.rows.draw(scene, fonts, images);
+    // Gutter badges over the numbers (left of the digits, so they
+    // never overlap).
+    for (line, error) in self.markers.clone() {
+      let cy = code.1 + (line as f32 - 1.0) * CODE_LINE_H - offset;
+      if cy + CODE_LINE_H < code.1 || cy > code.1 + code.3 {
+        continue;
+      }
+      let color = if error { DIAG_ERROR } else { DIAG_WARN };
+      scene.fill(
+        Fill::NonZero,
+        Affine::IDENTITY,
+        &Brush::Solid(color),
+        None,
+        &Circle::new(
+          (px(code.0 + CODE_GUTTER_W - 23.0), px(cy + CODE_LINE_H / 2.0)),
+          px(DIAG_DOT_R),
+        ),
+      );
+    }
     // Selection wash, segmented per line.
     if let Some((sa, sb)) = self.selection_range() {
       let wash = {
@@ -1364,7 +1451,6 @@ impl View for CodeEditor {
           (c.a as f32 * CODE_SELECTION_ALPHA).round() as u8,
         )
       };
-      let offset = self.bar.offset();
       let lines = self.lines();
       let mut start = 0usize;
       for (index, line) in lines.iter().enumerate() {
@@ -1702,6 +1788,19 @@ mod tests {
     let ed = CodeEditor::new("hi".to_string());
     assert!(!ed.panel_collapsed());
     assert_eq!(ed.panel_height(), PANEL_DEFAULT_H);
+  }
+
+  #[test]
+  fn diagnostics_sort_dedupe_and_resolve() {
+    let mut ed = CodeEditor::new("a\nb\nc".to_string());
+    assert_eq!(ed.marker_at(1), None);
+    ed.set_diagnostics(&[(3, false), (0, true), (2, false), (2, true)]);
+    // Line 0 filtered out, line 2 keeps error wins.
+    assert_eq!(ed.marker_at(1), None);
+    assert_eq!(ed.marker_at(2), Some(true));
+    assert_eq!(ed.marker_at(3), Some(false));
+    ed.set_diagnostics(&[]);
+    assert_eq!(ed.marker_at(2), None);
   }
 
   #[test]
