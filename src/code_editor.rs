@@ -1057,9 +1057,24 @@ impl CodeEditor {
   /// navigation): focuses, clears the highlight and scrolls the line
   /// into view. Memory only, no fonts needed.
   pub fn goto_line(&mut self, line: usize) {
-    let count = self.lines().len().max(1);
-    let line = line.max(1).min(count) - 1;
-    self.caret = self.caret_from_line_col(line, 0);
+    self.goto_line_col(line, 0);
+  }
+
+  /// Jump the caret to a 1-based line plus byte column (search
+  /// navigation): clamps both into the line, focuses and scrolls it
+  /// into view. Memory only, no fonts needed.
+  pub fn goto_line_col(&mut self, line: usize, col: usize) {
+    let lines = self.lines();
+    let count = lines.len().max(1);
+    let index = line.max(1).min(count) - 1;
+    let len = lines.get(index).map(|s| s.len()).unwrap_or(0);
+    let mut clamped = col.min(len);
+    while clamped > 0 && !self.text.is_char_boundary(
+      self.caret_from_line_col(index, 0) + clamped,
+    ) {
+      clamped -= 1;
+    }
+    self.caret = self.caret_from_line_col(index, clamped);
     self.anchor = self.caret;
     self.sel = false;
     self.selected = true;
@@ -1816,6 +1831,22 @@ mod tests {
     assert_eq!(ed.selected_text(), "b");
     assert!(ed.press_key(Key::SelectRight));
     assert_eq!(ed.selected_text(), "bc");
+  }
+
+  #[test]
+  fn goto_line_col_lands_on_column() {
+    let mut ed = CodeEditor::new("ab\ncde\nf".to_string());
+    ed.rect = (0.0, 0.0, 300.0, 200.0);
+    ed.goto_line_col(2, 2);
+    let (line, col) = ed.line_col();
+    assert_eq!((line, col), (1, 2));
+    // Clamped into the line and the file.
+    ed.goto_line_col(2, 99);
+    let (line, col) = ed.line_col();
+    assert_eq!((line, col), (1, 3));
+    ed.goto_line_col(99, 0);
+    let (line, _) = ed.line_col();
+    assert_eq!(line, 2);
   }
 
   #[test]

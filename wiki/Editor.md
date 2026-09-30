@@ -51,7 +51,7 @@ pages: narrow windows squeeze the code, wide windows use everything.
 | `pills` | `BasicToolbar` | Single dead Run/Stop pair (`play.fill`, divider, `stop.fill`) at the sidebar top right edge, centered on the traffic row: hover/press tint only, nothing fires; content title via `set_title` (`{project} › My Mac`, `ed.device`) |
 | `topbar` | `FileImage` + `BasicToolbar` + `NestedMenu` + pills | 22px `Resources/computer.png` glyph left of the `My Computer` text-menu at 15px (`button_font`, `menu.*` keys, sections Devices/Build/Utilities with `computer.png`/`wrench.png`/`up.png` row icons via the new `MenuItem::icon` API); the picked row reflects on top (button label plus glyph, display only) on a 36px glass pill: the pill centers on the content middle right of the sidebar and wraps a compact group (glyph plus gap plus button text plus gap plus chevron) with equal padding, so icon, text and chevron sit centered inside; the button width derives from the button text only (not the widest dropdown row) and the menu stays vertically centered in the pill; dead chevron pair (`chevron.left`, divider, `chevron.right`) at the content left; notes placeholder pill (`chart.line.uptrend.xyaxis`, round 36px circle) at the content right (hover and press tint only, toggles the bottom panel open or closed); no content title, no collapse button; `HorizontalDivider` between pills and editor; all example only |
 | `navigator` | `Sidebar` + `BarSwitcher` + outline tree + warnings overlay | Project files below the tabs (see `open`) as a nested `BasicOutlineGroup` tree: folders nest recursively with trailing `>` chevrons, type icons plus tints and slide plus fade animation, open state remembered per folder; clicks select the flat page (folders toggle too), the flat `Sidebar` rows stay underneath for the pages; a `BarSwitcher` tab switcher with icon plus label cells (`folder` `Files` default, warning triangle `Warnings & Errors`) sits in the gap above the tree; the warnings tab covers the tree with an example list (3 yellow warnings plus 2 red errors with tinted icons, file and line subtitles) while the content keeps showing the selected file; clicking a warning expands its ancestors, jumps back to `Files`, selects its file and moves the caret to its line; `collapsible(false)` (never collapses, no collapse button), search hidden (`search_field(false)`), toggle pill hidden; mouse reaches the element natively (hover, selection, wheel, resize cursor); `set_item_text(None)` clears the element's white default so labels follow the theme (light `#272727`) |
-| `search` | `SearchField` | Functionless capsule (`ed.search`) pinned to the sidebar bottom: 28px tall, full column width even while resizing; takes focus and typing, never searches |
+| `search` | `SearchField` | Live capsule (`ed.search`) pinned to the sidebar bottom: 28px tall, full column width even while resizing; typing filters live: on the Files tab every content hit across files covers the tree (plain `doc.fill` icon plus `file:line` title plus the matched code snippet, capped at 200 rows, read-only pages skipped, `search.no_results` placeholder while empty), on the Warnings tab only matching issues stay; click or Enter jumps to the hit (file select plus caret to line and column), ESC clears the query; search typing never arms the background check |
 | `editor` | `CodeEditor` pages | Editable 40-line Rust hello example through the DocumentKit Rust tokenizer (`highlight` → `Span`s: bold keywords, underlined strings, dimmed italic comments, gaps plain; per line, example code uses no multi-line constructs); gray `Footnote` gutter numbers share the code text size so they stay glued to their lines; lines carrying a warning or error always show a tinted gutter badge, a tinted line number and a matching line wash like the reference (red errors, yellow warnings); spans rebuild on every edit and on theme text change; spans rebuild on every edit and on theme text change; click inside focuses with a caret, drag selects, double-click selects the word, typing replaces the highlight, `Backspace` deletes, `Enter` splits, arrows move (`Shift` extends),   `ESC` unfocuses, `Ctrl+A/C/X/V/Z/Y` selects all, copies, cuts, pastes, undoes and redoes through an in-memory clipboard; caret, click mapping and the selection wash measure through the same rich monospace DocumentKit layout the code rows render with (bold runs included), so the   highlight hugs the letters exactly; caret, click mapping,
   selection, gutter badges and line washes all use the row pitch
   measured from the laid-out rows (never a fixed px guess), so the
@@ -110,6 +110,8 @@ next to `XCODE_PROJECT_NAME`).
   select, I-beam hover, typing, `Backspace`, `Enter`, arrows, `ESC`
   to unfocus, `Ctrl+A/C/X/V/Z/Y` for select, clipboard, undo and redo
   with an in-memory clipboard capped at 100 undo steps).
+  `goto_line_col` jumps to a 1-based line plus byte column for search
+  hits (both clamped).
 - Below the code sits a bottom panel with a drag divider: folded
   away by default, click expands or collapses it like a sidebar,
   dragging resizes it (100px..420px, 180px default); the divider
@@ -131,11 +133,15 @@ next to `XCODE_PROJECT_NAME`).
   `nav_tab` cell; the Files tab paints the sidebar background over
   the flat rows and draws the nested outline tree (`build_tree`
   maps flat rows to outline paths, `poll_tree_select` lands outline
-  clicks on the flat page the same frame); tree presses skip the
-  flat rows except on the resize edge. The warnings tab draws
-  example rows with tinted icons instead; a warning click expands
-  its ancestors and jumps (`Files` tab, file select, `goto_line`)
-  at once so the content never flashes the wrong file.
+  clicks on the flat page the same frame), or the search results
+  overlay while the capsule holds a query (`recompute_search`
+  indexes every case-insensitive occurrence over editable pages,
+  `jump_to_hit` selects the file and moves the caret to line and
+  column); tree presses skip the flat rows except on the resize edge.
+  The warnings tab draws issue rows (filtered by the query when set)
+  instead; a warning click expands its ancestors and jumps (`Files`
+  tab, file select, `goto_line`) at once so the content never
+  flashes the wrong file.
 - Every page shows its own file diagnostics inline:
   `EditorUi` hands each `CodeEditor` its warning and error lines
   per file every frame; marked lines keep a tinted gutter badge, a

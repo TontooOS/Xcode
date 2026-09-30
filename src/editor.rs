@@ -3,11 +3,12 @@
 //! A static Xcode-like IDE card built on the `Sidebar` element: working
 //! traffic lights (owned by the sidebar), a dead Run/Stop pill pair at
 //! the sidebar top right (no callbacks, nothing is ever built or run),
-//! a non-collapsible file navigator with one preselected file, a
-//! functionless search capsule stretched across the sidebar bottom and
-//! real editable file content. Code pages accept clicks and typing
-//! like a normal text field and auto-save their backing file 400ms
-//! after typing stops; folders and binary files are read-only.
+//! a non-collapsible file navigator with one preselected file, a live
+//! search capsule stretched across the sidebar bottom (every content
+//! hit across files, warnings filtered on their tab) and real editable
+//! file content. Code pages accept clicks and typing like a normal
+//! text field and auto-save their backing file 400ms after typing
+//! stops; folders and binary files are read-only.
 //!
 //! Handoff without CLI: the starter sets `XCODE_PROJECT_NAME` on a
 //! spawned copy of this binary and closes its own window at once;
@@ -336,6 +337,21 @@ struct ActiveCheck {
   child: Arc<Mutex<Option<Child>>>,
 }
 
+/// Max content search hits (the results list stays usable).
+pub const MAX_SEARCH_HITS: usize = 200;
+/// Max chars of the matched code line shown per search row.
+pub const SEARCH_SNIPPET_CHARS: usize = 90;
+
+/// One content search hit: file row plus 1-based line, byte column
+/// and the matched code line snippet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchHit {
+  pub file: usize,
+  pub line: usize,
+  pub col: usize,
+  pub snippet: String,
+}
+
 pub struct EditorUi {
   sidebar: Sidebar,
   search: SearchField,
@@ -384,6 +400,18 @@ pub struct EditorUi {
   selected_warn: usize,
   /// Placed warning row rects for tap jumps.
   warn_rects: Vec<(f32, f32, f32, f32)>,
+  /// Content search hits for the current query (row order, then line).
+  search_hits: Vec<SearchHit>,
+  /// Overlay rows parallel to the search hits.
+  search_rows: Vec<HStack>,
+  /// Placed search row rects for tap jumps.
+  search_rects: Vec<(f32, f32, f32, f32)>,
+  /// Last jumped-to search hit.
+  selected_search: usize,
+  /// Last indexed query (recomputes only on change).
+  last_query: String,
+  /// Placeholder line while a query matches nothing.
+  search_empty: BasicText,
   /// Navigator page count (one file page per row).
   page_total: usize,
   /// Real filesystem path per row (empty for memory-only fallbacks).
@@ -676,6 +704,12 @@ impl EditorUi {
         .fill(Color::from_rgb8(0x00, 0x7a, 0xff)),
       selected_warn: 0,
       warn_rects: Vec::new(),
+      search_hits: Vec::new(),
+      search_rows: Vec::new(),
+      search_rects: Vec::new(),
+      selected_search: 0,
+      last_query: String::new(),
+      search_empty: BasicText::new(lang::t("search.no_results")),
       page_total,
       file_paths: Vec::new(),
       project_root: None,
@@ -925,6 +959,142 @@ impl EditorUi {
     }
   }
 
+  /// True while the search capsule holds a query: the results overlay
+  /// covers the navigator rows (Files tab) or filters the warnings.
+  pub fn search_active(&self) -> bool {
+    !self.search.text_value().trim().is_empty()
+  }
+
+  /// Rebuild the content search index when the query changed
+  /// (case-insensitive, every occurrence, row order then line order,
+  /// read-only pages skipped, capped at `MAX_SEARCH_HITS`).
+  pub(crate) fn recompute_search(&mut self) {
+    let query = self.search.text_value().trim().to_string();
+    if query == self.last_query {
+      return;
+    }
+    self.last_query = query.clone();
+    self.search_hits.clear();
+    self.search_rows.clear();
+    self.selected_search = 0;
+    let needle = query.to_lowercase();
+    if needle.is_empty() {
+      return;
+    }
+    let mut pages: Vec<(String, bool)> = Vec::new();
+    self.each_page(|ed| pages.push((ed.text_value().to_string(), ed.is_read_only())));
+    for (index, (text, read_only)) in pages.iter().enumerate() {
+      if *read_only || self.search_hits.len() >= MAX_SEARCH_HITS {
+        continue;
+      }
+      for (ln, line) in text.split('\n').enumerate() {
+        let lower = line.to_lowercase();
+        let mut from = 0usize;
+        while from <= lower.len() {
+          let Some(off) = lower[from..].find(needle.as_str()) else {
+            break;
+          };
+          let chars_before = lower[..from + off].chars().count();
+          let byte_col = line
+            .char_indices()
+            .nth(chars_before)
+            .map(|(b, _)| b)
+            .unwrap_or(line.len());
+          let mut snippet: String = line
+            .trim()
+            .replace('\t', "  ")
+            .chars()
+            .take(SEARCH_SNIPPET_CHARS)
+            .collect();
+          if line.trim().chars().count() > SEARCH_SNIPPET_CHARS {
+            snippet.push_str("...");
+          }
+          self.search_hits.push(SearchHit {
+            file: index,
+            line: ln + 1,
+            col: byte_col,
+            snippet,
+          });
+          if self.search_hits.len() >= MAX_SEARCH_HITS {
+            break;
+          }
+          from += off + needle.len();
+        }
+        if self.search_hits.len() >= MAX_SEARCH_HITS {
+          break;
+        }
+      }
+    }
+    self.search_rows = self
+      .search_hits
+      .iter()
+      .map(|hit| {
+        let name = self
+          .warn_files
+          .get(hit.file)
+          .cloned()
+          .unwrap_or_default();
+        warn_row("doc.fill", &format!("{name}:{}", hit.line), &hit.snippet)
+      })
+      .collect();
+  }
+
+  /// Warning indices visible under the current query (all without a
+  /// query, title or file/line match with one).
+  pub(crate) fn visible_warn_indices(&self) -> Vec<usize> {
+    let query = self.search.text_value().trim().to_lowercase();
+    if query.is_empty() {
+      return (0..self.warn_items.len()).collect();
+    }
+    self
+      .warn_items
+      .iter()
+      .enumerate()
+      .filter(|(_, item)| {
+        item.title.to_lowercase().contains(&query)
+          || item.subtitle(&self.warn_files).to_lowercase().contains(&query)
+      })
+      .map(|(index, _)| index)
+      .collect()
+  }
+
+  /// Jump to a content search hit: select its file and move the caret
+  /// to its line and column. Runs at once on press.
+  pub(crate) fn jump_to_hit(&mut self, pos: usize) {
+    let Some(hit) = self.search_hits.get(pos).cloned() else {
+      return;
+    };
+    if hit.file >= self.warn_files.len() {
+      return;
+    }
+    self.selected_search = pos;
+    if let Some(path) = self.tree_paths.get(hit.file).cloned() {
+      for depth in 1..path.len() {
+        self.nav_tree.set_expanded(&path[..depth], true);
+      }
+      self.nav_tree.select(path);
+    }
+    self.sidebar.select(hit.file);
+    if let Some(page) = self.sidebar.page_mut(hit.file) {
+      if let Some(ed) = page.as_any_mut().downcast_mut::<CodeEditor>() {
+        ed.goto_line_col(hit.line, hit.col);
+      }
+    }
+  }
+
+  /// Jump to the first visible hit (Enter in the search capsule):
+  /// first content hit on the Files tab, first matching warning on
+  /// the Warnings tab.
+  pub(crate) fn jump_to_first_search_hit(&mut self) {
+    if self.nav_tab.get() == 1 {
+      if let Some(&real) = self.visible_warn_indices().first() {
+        self.jump_to_issue(real);
+      }
+    } else if !self.search_hits.is_empty() {
+      self.jump_to_hit(0);
+    }
+  }
+
   /// Active navigator tab (`0` files, `1` warnings).
   pub fn nav_index(&self) -> usize {
     self.nav_tab.get()
@@ -975,6 +1145,8 @@ impl EditorUi {
     // Background check scheduling (reap, cancel on new keystrokes,
     // spawn after 2.5s idle). Files were flushed before every spawn.
     self.poll_check();
+    // Content search index follows the query (cached on change).
+    self.recompute_search();
 
     self.sidebar.set_theme(palette.accent, dark);
     self.sidebar.set_glass(theme.mode, theme.glass);
@@ -1043,6 +1215,44 @@ impl EditorUi {
         }
       }
     }
+    // Search rows: same selected wash, a plain file icon for every
+    // hit, theme text otherwise.
+    for (pos, row) in self.search_rows.iter_mut().enumerate() {
+      let selected = pos == self.selected_search;
+      if let Some(symbol) = row.child_mut::<SFSymbolImage>(0) {
+        if selected {
+          symbol.set_color(Some(Color::WHITE));
+        } else {
+          symbol.set_color(None);
+          symbol.set_theme(palette.text, dark);
+        }
+        symbol.set_focused(focused);
+      }
+      if let Some(texts) = row.child_mut::<VStack>(1) {
+        if let Some(title) = texts.child_mut::<BasicText>(0) {
+          if selected {
+            title.set_foreground(TextForeground::Color(Color::WHITE));
+          } else {
+            title.set_foreground(TextForeground::Primary);
+            title.set_theme(theme.mode);
+          }
+          title.set_focused(focused);
+        }
+        if let Some(sub) = texts.child_mut::<BasicText>(1) {
+          if selected {
+            sub.set_foreground(TextForeground::Color(Color::from_rgba8(
+              255, 255, 255, 220,
+            )));
+          } else {
+            sub.set_foreground(TextForeground::Secondary);
+            sub.set_theme(theme.mode);
+          }
+          sub.set_focused(focused);
+        }
+      }
+    }
+    self.search_empty.set_theme(theme.mode);
+    self.search_empty.set_focused(focused);
     // Picked menu row reflects on top (label plus glyph, display
     // only, no function).
     if let Some(index) = self.device_sel.take() {
@@ -1090,10 +1300,45 @@ impl EditorUi {
     );
     self.nav_tabs.draw(scene, fonts, images);
     let search_top = viewport.y + viewport.height - SEARCH_PAD - SEARCH_H;
-    // Files tab: nested outline tree over the flat rows (trailing
-    // chevron, remembered open state, animated). The flat rows stay
-    // underneath for the pages; selection flows through the poll.
-    if self.nav_tab.get() == 0 {
+    // Files tab with a query: content search hits cover the tree
+    // (plain file icon plus `file:line` plus the matched snippet).
+    // A click jumps straight into the editor.
+    if self.nav_tab.get() == 0 && self.search_active() {
+      let bg_y = viewport.y + WARN_TOP - 2.0;
+      let scale = fonts.scale as f64;
+      let px = |v: f32| v as f64 * scale;
+      Self::paint_column_bg(scene, px, viewport.x, bg_y, col_w, search_top, dark, focused);
+      let row_w = col_w - SEARCH_PAD * 2.0 - 12.0;
+      let mut rects = Vec::new();
+      if self.search_hits.is_empty() {
+        let (empty_w, empty_h) = self.search_empty.measure(fonts);
+        self.search_empty.place(
+          fonts,
+          viewport.x + SEARCH_PAD + 6.0,
+          viewport.y + WARN_TOP,
+          empty_w,
+          empty_h,
+        );
+        self.search_empty.draw(scene, fonts, images);
+      }
+      for (pos, row) in self.search_rows.iter_mut().enumerate() {
+        let ry = viewport.y + WARN_TOP + pos as f32 * (WARN_ROW_H + WARN_GAP);
+        if pos == self.selected_search {
+          self.warn_bg.place(
+            fonts,
+            viewport.x + SEARCH_PAD,
+            ry,
+            (col_w - SEARCH_PAD * 2.0).max(0.0),
+            WARN_ROW_H,
+          );
+          self.warn_bg.draw(scene, fonts, images);
+        }
+        row.place(fonts, viewport.x + SEARCH_PAD + 6.0, ry, row_w.max(0.0), WARN_ROW_H);
+        row.draw(scene, fonts, images);
+        rects.push((viewport.x + SEARCH_PAD, ry, (col_w - SEARCH_PAD * 2.0).max(0.0), WARN_ROW_H));
+      }
+      self.search_rects = rects;
+    } else if self.nav_tab.get() == 0 {
       let scale = fonts.scale as f64;
       let px = |v: f32| v as f64 * scale;
       let bg_y = viewport.y + WARN_TOP - 2.0;
@@ -1113,18 +1358,20 @@ impl EditorUi {
       self.tree_rect = (viewport.x, tree_y, col_w, tree_h);
     }
     // Warnings tab: sidebar background over the file rows plus the
-    // example issue rows with an accent wash behind the jumped-to
-    // row. The content keeps showing the selected file.
+    // issue rows with an accent wash behind the jumped-to row. A
+    // query filters the list (title or file and line). The content
+    // keeps showing the selected file.
     if self.nav_tab.get() == 1 {
       let bg_y = viewport.y + WARN_TOP - 2.0;
       let scale = fonts.scale as f64;
       let px = |v: f32| v as f64 * scale;
       Self::paint_column_bg(scene, px, viewport.x, bg_y, col_w, search_top, dark, focused);
       let row_w = col_w - SEARCH_PAD * 2.0 - 12.0;
+      let visible = self.visible_warn_indices();
       let mut rects = Vec::new();
-      for (index, row) in self.warn_rows.iter_mut().enumerate() {
-        let ry = viewport.y + WARN_TOP + index as f32 * (WARN_ROW_H + WARN_GAP);
-        if index == self.selected_warn {
+      for (pos, &real) in visible.iter().enumerate() {
+        let ry = viewport.y + WARN_TOP + pos as f32 * (WARN_ROW_H + WARN_GAP);
+        if real == self.selected_warn {
           self.warn_bg.place(
             fonts,
             viewport.x + SEARCH_PAD,
@@ -1134,6 +1381,7 @@ impl EditorUi {
           );
           self.warn_bg.draw(scene, fonts, images);
         }
+        let row = &mut self.warn_rows[real];
         row.place(fonts, viewport.x + SEARCH_PAD + 6.0, ry, row_w.max(0.0), WARN_ROW_H);
         row.draw(scene, fonts, images);
         rects.push((viewport.x + SEARCH_PAD, ry, (col_w - SEARCH_PAD * 2.0).max(0.0), WARN_ROW_H));
@@ -1277,7 +1525,19 @@ impl EditorUi {
     if self.nav_tab.get() != 1 {
       return None;
     }
-    self.warn_rects.iter().position(|r| {
+    // Filtered position back to the real warning index.
+    self
+      .warn_rects
+      .iter()
+      .position(|r| x >= r.0 && x <= r.0 + r.2 && y >= r.1 && y <= r.1 + r.3)
+      .and_then(|pos| self.visible_warn_indices().get(pos).copied())
+  }
+
+  fn hit_search(&self, x: f32, y: f32) -> Option<usize> {
+    if self.nav_tab.get() != 0 || !self.search_active() {
+      return None;
+    }
+    self.search_rects.iter().position(|r| {
       x >= r.0 && x <= r.0 + r.2 && y >= r.1 && y <= r.1 + r.3
     })
   }
@@ -1285,12 +1545,14 @@ impl EditorUi {
   pub fn mouse_down(&mut self, x: f64, y: f64) {
     // Native element feel (press states, selection, resize): clicks
     // trigger no actions, there are no callbacks anywhere. The search
-    // only takes focus and typing, it never searches. The inspector
-    // pill only toggles the bottom panel. A warning press jumps to
-    // its code at once so the content never flashes the wrong file.
-    // Tree presses skip the flat rows (the poll lands the page);
-    // the resize edge keeps the sidebar.
+    // capsule filters and finds across files (see `mouse_up` jumps).
+    // The inspector pill only toggles the bottom panel. A warning or
+    // search press jumps to its code at once so the content never
+    // flashes the wrong file. Tree presses skip the flat rows (the
+    // poll lands the page); the resize edge keeps the sidebar. While
+    // search results cover the tree, the tree ignores presses.
     let tree_hit = self.nav_tab.get() == 0
+      && !self.search_active()
       && point_in_rect(self.tree_rect, x as f32, y as f32);
     let resize = self.sidebar.wants_resize_cursor(x, y);
     if !tree_hit || resize {
@@ -1305,7 +1567,9 @@ impl EditorUi {
     if tree_hit && !resize {
       self.nav_tree.mouse_down(x, y);
     }
-    if let Some(index) = self.hit_warn(x as f32, y as f32) {
+    if let Some(pos) = self.hit_search(x as f32, y as f32) {
+      self.jump_to_hit(pos);
+    } else if let Some(index) = self.hit_warn(x as f32, y as f32) {
       self.jump_to_issue(index);
     }
   }
@@ -1320,6 +1584,13 @@ impl EditorUi {
     self.inspector.mouse_up(x, y);
     self.nav_tabs.mouse_up(x, y);
     self.nav_tree.mouse_up(x, y);
+    // Tap jumps land on release (rects refresh every frame).
+    self.recompute_search();
+    if let Some(pos) = self.hit_search(x as f32, y as f32) {
+      self.jump_to_hit(pos);
+    } else if let Some(index) = self.hit_warn(x as f32, y as f32) {
+      self.jump_to_issue(index);
+    }
   }
 
   pub fn mouse_wheel(&mut self, dx: f64, dy: f64) {
@@ -1328,13 +1599,37 @@ impl EditorUi {
 
   pub fn type_text(&mut self, content: &str) {
     // Search first while it holds focus, else the active code page.
-    // Bound files auto-save 400ms after typing stops.
+    // Bound files auto-save 400ms after typing stops. Search typing
+    // never arms the background check.
     self.search.type_text(content);
     self.sidebar.page_text(content);
-    self.note_change_if_editable();
+    if !self.search.is_selected() {
+      self.note_change_if_editable();
+    }
   }
 
   pub fn key(&mut self, key: Key) -> bool {
+    // Search shortcuts while the capsule holds focus: Enter jumps to
+    // the first visible hit, ESC clears the query (a second ESC
+    // leaves the field as usual).
+    if self.search.is_selected() {
+      match key {
+        Key::Enter => {
+          if self.search_active() {
+            self.recompute_search();
+            self.jump_to_first_search_hit();
+            return true;
+          }
+        }
+        Key::Escape => {
+          if !self.search.text_value().is_empty() {
+            self.search.set_text(String::new());
+            return true;
+          }
+        }
+        _ => {}
+      }
+    }
     if self.search.key(key) {
       return true;
     }
@@ -1376,6 +1671,10 @@ impl EditorUi {
     for row in self.warn_rows.iter_mut() {
       row.set_focused(focused);
     }
+    for row in self.search_rows.iter_mut() {
+      row.set_focused(focused);
+    }
+    self.search_empty.set_focused(focused);
   }
 
   /// Bottom panel master switch flipped by the inspector pill.
@@ -1703,6 +2002,109 @@ mod tests {
   fn open_rejects_missing_dir() {
     let missing = std::path::Path::new("/definitely/not/here-xcode");
     assert!(EditorUi::open("x", missing).is_err());
+  }
+
+  #[test]
+  fn search_finds_every_occurrence_across_files() {
+    let (parent, root) = scaffold_root("search");
+    let mut ui = EditorUi::open("My App", &root).expect("open");
+    ui.search.set_text("tontooui");
+    ui.recompute_search();
+    assert!(!ui.search_hits.is_empty());
+    assert_eq!(ui.search_rows.len(), ui.search_hits.len());
+    // Spans at least two files, every hit carries file, line and snippet.
+    let mut files: Vec<usize> = ui.search_hits.iter().map(|hit| hit.file).collect();
+    files.sort();
+    files.dedup();
+    assert!(files.len() >= 2);
+    for hit in &ui.search_hits {
+      assert!(hit.line >= 1);
+      assert!(!hit.snippet.is_empty());
+      assert!(hit.snippet.to_lowercase().contains("tontooui"));
+    }
+    // Case-insensitive: upper case finds the same hits.
+    ui.search.set_text("TontooUI");
+    ui.recompute_search();
+    let upper = ui.search_hits.len();
+    ui.search.set_text("tontooui");
+    ui.recompute_search();
+    assert_eq!(ui.search_hits.len(), upper);
+    // Click-jump lands on the hit file and line.
+    let first = ui.search_hits[0].clone();
+    ui.jump_to_hit(0);
+    assert_eq!(ui.sidebar.selected_index(), first.file);
+    assert_eq!(ui.selected_search, 0);
+    let page = ui.sidebar.page_mut(first.file).expect("page");
+    let ed = page
+      .as_any_mut()
+      .downcast_mut::<CodeEditor>()
+      .expect("code page");
+    let (line, _) = ed.line_col();
+    assert_eq!(line, first.line - 1);
+    let _ = std::fs::remove_dir_all(&parent);
+  }
+
+  #[test]
+  fn search_skips_read_only_pages() {
+    let (parent, root) = scaffold_root("skipbin");
+    std::fs::write(root.join("blob.bin"), b"hello\x00world").unwrap();
+    let entries = crate::project_files::list_project_files(&root);
+    let blob = entries
+      .iter()
+      .position(|entry| entry.label.trim() == "blob.bin")
+      .expect("blob row");
+    let mut ui = EditorUi::open("My App", &root).expect("open");
+    ui.search.set_text("hello");
+    ui.recompute_search();
+    assert!(!ui.search_hits.is_empty());
+    assert!(ui.search_hits.iter().all(|hit| hit.file != blob));
+    let _ = std::fs::remove_dir_all(&parent);
+  }
+
+  #[test]
+  fn warnings_filter_by_query() {
+    let code = example_code("testApp", "test", "arlo");
+    let mut ui = EditorUi::new("test", code);
+    assert_eq!(ui.visible_warn_indices(), vec![0, 1, 2, 3, 4]);
+    ui.search.set_text("unused");
+    assert_eq!(ui.visible_warn_indices(), vec![0]);
+    ui.search.set_text("MISMATCH");
+    assert_eq!(ui.visible_warn_indices(), vec![1]);
+    // File and line subtitles match too.
+    ui.search.set_text("contentview");
+    assert!(!ui.visible_warn_indices().is_empty());
+    ui.search.set_text("zzz-no-such-warning");
+    assert!(ui.visible_warn_indices().is_empty());
+  }
+
+  #[test]
+  fn search_enter_jumps_and_escape_clears() {
+    use crate::TontooUI::renderer::FontSystem;
+    let (parent, root) = scaffold_root("keys");
+    let mut ui = EditorUi::open("My App", &root).expect("open");
+    let mut fonts = FontSystem::new();
+    ui.search.place(&mut fonts, 0.0, 0.0, 200.0, 28.0);
+    ui.search.mouse_down(10.0, 10.0);
+    assert!(ui.search.is_selected());
+    ui.search.set_text("hello");
+    ui.recompute_search();
+    assert!(!ui.search_hits.is_empty());
+    let first = ui.search_hits[0].clone();
+    assert!(ui.key(Key::Enter));
+    assert_eq!(ui.sidebar.selected_index(), first.file);
+    // ESC clears the query, a second ESC leaves the field as usual.
+    assert!(ui.key(Key::Escape));
+    assert_eq!(ui.search.text_value(), "");
+    assert!(!ui.search_active());
+    assert!(ui.key(Key::Escape));
+    assert!(!ui.search.is_selected());
+    // Search typing never arms the background check.
+    assert!(ui.last_change.is_some());
+    let armed = ui.last_change;
+    ui.search.mouse_down(10.0, 10.0);
+    ui.type_text("zzz");
+    assert_eq!(ui.last_change, armed);
+    let _ = std::fs::remove_dir_all(&parent);
   }
 
   fn scaffold_root(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {

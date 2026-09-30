@@ -23,6 +23,7 @@
     "location.new_folder": "Neuer Ordner:",
     "ed.search": "Suchen",
     "ed.binary": "Binärdatei, nicht editierbar.",
+    "search.no_results": "Keine Treffer",
     "menu.device": "My Computer",
     "menu.devices": "Geräte",
     "menu.build": "Build",
