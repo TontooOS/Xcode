@@ -35,8 +35,11 @@ use crate::TontooUI::theme::{ThemeMode, desaturate};
 pub const CODE_GUTTER_W: f32 = 30.0;
 /// Gap between gutter and code.
 pub const CODE_GAP: f32 = 8.0;
-/// Fixed row height (Footnote 13px plus spacing).
+/// Fallback row pitch in logical px until the first layout measures
+/// the real one (keep in sync with `sync_pitch`).
 pub const CODE_LINE_H: f32 = 18.0;
+/// Row gap inside the rows stack (must match `build_rows`).
+pub const CODE_ROW_SPACING: f32 = 2.0;
 /// Caret width in logical px.
 pub const CODE_CARET_W: f32 = 2.0;
 /// Code text size (matches `TextStyle::Footnote`).
@@ -111,7 +114,7 @@ pub(crate) fn highlight_spans(line: &str, dark: bool) -> Vec<Span> {
 }
 
 fn build_rows(text: &str, dark: bool) -> VStack {
-  let mut rows = VStack::new().spacing(2.0).align(Align::Leading);
+  let mut rows = VStack::new().spacing(CODE_ROW_SPACING).align(Align::Leading);
   // `split` keeps the trailing empty line so the line count stays
   // stable while typing past the final newline.
   for (no, line) in text.split('\n').enumerate() {
@@ -361,6 +364,10 @@ pub struct CodeEditor {
   rect: (f32, f32, f32, f32),
   bar: Scrollbar,
   last_model: (f32, f32),
+  /// Measured row pitch (row height plus gap); refreshed from the
+  /// laid-out rows on every place and draw, so caret, washes and
+  /// clicks never drift off the lines.
+  pitch: f32,
   pending: Option<(f32, f32)>,
   drag: Option<(f32, f32)>,
   press_time: Option<Instant>,
@@ -420,6 +427,7 @@ impl CodeEditor {
       rect: (0.0, 0.0, 0.0, 0.0),
       bar: Scrollbar::new(),
       last_model: (-1.0, -1.0),
+      pitch: CODE_LINE_H,
       pending: None,
       drag: None,
       press_time: None,
@@ -543,7 +551,19 @@ impl CodeEditor {
   }
 
   fn content_h(&self) -> f32 {
-    self.lines().len() as f32 * CODE_LINE_H
+    self.lines().len() as f32 * self.pitch
+  }
+
+  /// Measure the real row pitch from the laid-out rows: the stack
+  /// total holds `n` rows plus `n-1` gaps, so the pitch is exact
+  /// instead of a px guess that drifts further down the page.
+  fn sync_pitch(&mut self, fonts: &mut FontSystem) {
+    let n = self.rows.len().max(1) as f32;
+    let (_, h) = self.rows.measure(fonts);
+    let pitch = (h + CODE_ROW_SPACING) / n;
+    if pitch > 0.0 && pitch.is_finite() {
+      self.pitch = pitch;
+    }
   }
 
   /// True while the pointer is over the code overlay bar (same
@@ -591,14 +611,15 @@ impl CodeEditor {
 
   /// Keep the caret visible inside the code viewport.
   fn track_caret(&mut self) {
+    let pitch = self.pitch;
     let (line, _) = self.line_col();
-    let top = line as f32 * CODE_LINE_H;
+    let top = line as f32 * pitch;
     let offset = self.bar.offset();
     let visible = self.code_h();
     if top - offset < 0.0 {
       self.bar.set_offset(top.max(0.0));
-    } else if top + CODE_LINE_H - offset > visible {
-      self.bar.set_offset((top + CODE_LINE_H - visible).max(0.0));
+    } else if top + pitch - offset > visible {
+      self.bar.set_offset((top + pitch - visible).max(0.0));
     }
   }
 
@@ -894,7 +915,7 @@ impl CodeEditor {
   ) -> usize {
     let lines = self.lines();
     let rel = (y - self.rect.1 + self.bar.offset()).max(0.0);
-    let line = ((rel / CODE_LINE_H) as usize).min(lines.len() - 1);
+    let line = ((rel / self.pitch) as usize).min(lines.len() - 1);
     let code_x = self.rect.0 + CODE_GUTTER_W + CODE_GAP;
     let goal = (x - code_x).max(0.0);
     let target = lines.get(line).cloned().unwrap_or_default();
@@ -1336,8 +1357,9 @@ impl CodeEditor {
 
 impl View for CodeEditor {
   fn measure(&mut self, fonts: &mut FontSystem) -> (f32, f32) {
+    self.sync_pitch(fonts);
     let (w, h) = self.rows.measure(fonts);
-    (w.max(300.0), h.max(self.lines().len() as f32 * CODE_LINE_H))
+    (w.max(300.0), h.max(self.lines().len() as f32 * self.pitch))
   }
 
   fn place(
@@ -1349,6 +1371,7 @@ impl View for CodeEditor {
     height: f32,
   ) {
     self.rect = (x, y, width, height);
+    self.sync_pitch(fonts);
     self.sync_bar(fonts);
     self.sync_log_bar();
   }
@@ -1359,6 +1382,9 @@ impl View for CodeEditor {
     fonts: &mut FontSystem,
     images: &mut ImageLoader<'_>,
   ) {
+    // Refresh the measured pitch first: every caret, wash and
+    // click below must use the real row positions.
+    self.sync_pitch(fonts);
     if let Some((px, py)) = self.pending.take() {
       if self.selected {
         let caret = self.caret_at_point(fonts, px, py);
@@ -1404,9 +1430,10 @@ impl View for CodeEditor {
     // Diagnostic line washes under the text (visible marked lines
     // only, full code width).
     let offset = self.bar.offset();
+    let pitch = self.pitch;
     for (line, error) in self.markers.clone() {
-      let cy = code.1 + (line as f32 - 1.0) * CODE_LINE_H - offset;
-      if cy + CODE_LINE_H < code.1 || cy > code.1 + code.3 {
+      let cy = code.1 + (line as f32 - 1.0) * pitch - offset;
+      if cy + pitch < code.1 || cy > code.1 + code.3 {
         continue;
       }
       let base = if error { DIAG_ERROR } else { DIAG_WARN };
@@ -1417,15 +1444,15 @@ impl View for CodeEditor {
         Affine::IDENTITY,
         &Brush::Solid(Color::from_rgba8(c.r, c.g, c.b, (c.a as f32 * alpha).round() as u8)),
         None,
-        &Rect::new(px(code.0), px(cy), px(code.0 + code.2), px(cy + CODE_LINE_H)),
+        &Rect::new(px(code.0), px(cy), px(code.0 + code.2), px(cy + pitch)),
       );
     }
     self.rows.draw(scene, fonts, images);
     // Gutter badges over the numbers (left of the digits, so they
     // never overlap).
     for (line, error) in self.markers.clone() {
-      let cy = code.1 + (line as f32 - 1.0) * CODE_LINE_H - offset;
-      if cy + CODE_LINE_H < code.1 || cy > code.1 + code.3 {
+      let cy = code.1 + (line as f32 - 1.0) * pitch - offset;
+      if cy + pitch < code.1 || cy > code.1 + code.3 {
         continue;
       }
       let color = if error { DIAG_ERROR } else { DIAG_WARN };
@@ -1435,7 +1462,7 @@ impl View for CodeEditor {
         &Brush::Solid(color),
         None,
         &Circle::new(
-          (px(code.0 + CODE_GUTTER_W - 23.0), px(cy + CODE_LINE_H / 2.0)),
+          (px(code.0 + CODE_GUTTER_W - 23.0), px(cy + pitch / 2.0)),
           px(DIAG_DOT_R),
         ),
       );
@@ -1462,8 +1489,8 @@ impl View for CodeEditor {
           let x0 = rich_advance(fonts, line, dark, lo - start);
           let x1 = rich_advance(fonts, line, dark, hi - start);
           let cy =
-            self.rect.1 + index as f32 * CODE_LINE_H - offset;
-          if cy + CODE_LINE_H >= code.1 && cy <= code.1 + code.3 {
+            self.rect.1 + index as f32 * pitch - offset;
+          if cy + pitch >= code.1 && cy <= code.1 + code.3 {
             let cx = self.rect.0 + CODE_GUTTER_W + CODE_GAP;
             scene.fill(
               Fill::NonZero,
@@ -1474,7 +1501,7 @@ impl View for CodeEditor {
                 px(cx + x0),
                 px(cy + 1.0),
                 px(cx + x1),
-                px(cy + CODE_LINE_H - 3.0),
+                px(cy + pitch - 3.0),
               ),
             );
           }
@@ -1493,8 +1520,8 @@ impl View for CodeEditor {
         + CODE_GAP
         + rich_advance(fonts, &current, dark, upto);
       let cy =
-        self.rect.1 + line as f32 * CODE_LINE_H - self.bar.offset();
-      if cy + CODE_LINE_H >= code.1 && cy <= code.1 + code.3 {
+        self.rect.1 + line as f32 * pitch - self.bar.offset();
+      if cy + pitch >= code.1 && cy <= code.1 + code.3 {
         let accent = if self.focused {
           self.accent
         } else {
@@ -1509,7 +1536,7 @@ impl View for CodeEditor {
             px(cx),
             px(cy + 1.0),
             px(cx + CODE_CARET_W),
-            px(cy + CODE_LINE_H - 3.0),
+            px(cy + pitch - 3.0),
           ),
         );
       }
@@ -1741,6 +1768,20 @@ mod tests {
     ed.goto_line(99);
     let (last, _) = ed.line_col();
     assert_eq!(last, 2);
+  }
+
+  #[test]
+  fn pitch_matches_measured_rows() {
+    let mut fonts = FontSystem::new();
+    let mut ed = CodeEditor::new("a\nb\nc".to_string());
+    ed.sync_pitch(&mut fonts);
+    let (_, h) = ed.rows.measure(&mut fonts);
+    let expected = (h + CODE_ROW_SPACING) / 3.0;
+    assert!((ed.pitch - expected).abs() < 0.001);
+    assert!((ed.content_h() - 3.0 * ed.pitch).abs() < 0.001);
+    // Stable across syncs (no drift of its own).
+    ed.sync_pitch(&mut fonts);
+    assert!((ed.pitch - expected).abs() < 0.001);
   }
 
   #[test]
