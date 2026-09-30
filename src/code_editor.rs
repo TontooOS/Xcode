@@ -4,12 +4,17 @@
 //! live Rust highlighting, so this file owns a small custom `View`
 //! built from TontooUI primitives (`VStack` plus `HStack` rows with
 //! `BasicText` gutters and `FormattedText` code) plus DocumentKit
-//! spans and a caret rect. Behavior follows a normal text field:
-//! click inside focuses with a caret, typing inserts, `Backspace`
-//! deletes, `Enter` splits the line, arrows move, `ESC` unfocuses,
-//! hover shows the I-beam cursor. Edits stay in memory only.
+//! spans, a caret rect and a selection wash. Behavior follows a normal
+//! text field: click inside focuses with a caret, drag selects,
+//! double-click selects the word, typing replaces the highlight,
+//! `Backspace` deletes, `Enter` splits, arrows move (`Shift` extends),
+//! `ESC` unfocuses, `Ctrl+A/C/X/V/Z/Y` selects all, copies, cuts,
+//! pastes, undoes and redoes through an in-memory clipboard. Edits
+//! stay in memory only.
 
 use std::any::Any;
+use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 
 use vello::Scene;
 use vello::kurbo::{Affine, Rect};
@@ -34,6 +39,12 @@ pub const CODE_LINE_H: f32 = 18.0;
 pub const CODE_CARET_W: f32 = 2.0;
 /// Code text size (matches `TextStyle::Footnote`).
 pub const CODE_FONT_SIZE: f32 = 13.0;
+/// Undo/redo depth.
+pub const CODE_UNDO_LIMIT: usize = 100;
+/// Selection wash alpha (0-1 of the accent).
+pub const CODE_SELECTION_ALPHA: f32 = 0.3;
+/// Double-click gap in seconds for word select.
+pub const CODE_DOUBLE_TAP_SECONDS: f64 = 0.4;
 
 /// 40-line Rust hello example naming file, project and user.
 pub fn example_rust_code(file: &str, project: &str, user: &str) -> String {
@@ -99,12 +110,10 @@ pub(crate) fn highlight_spans(line: &str, dark: bool) -> Vec<Span> {
 
 fn build_rows(text: &str, dark: bool) -> VStack {
   let mut rows = VStack::new().spacing(2.0).align(Align::Leading);
-  for (no, line) in text.lines().enumerate() {
+  // `split` keeps the trailing empty line so the line count stays
+  // stable while typing past the final newline.
+  for (no, line) in text.split('\n').enumerate() {
     rows = rows.child(code_row(no, highlight_spans(line, dark)));
-  }
-  // Keep at least one row so empty text stays clickable.
-  if text.is_empty() {
-    rows = rows.child(code_row(0, highlight_spans("", dark)));
   }
   rows
 }
@@ -118,11 +127,7 @@ fn advance_of(fonts: &mut FontSystem, text: &str) -> f32 {
 }
 
 /// Byte caret at visual `goal_x` inside `line` (nearest advance).
-fn col_at_x(
-  fonts: &mut FontSystem,
-  line: &str,
-  goal_x: f32,
-) -> usize {
+fn col_at_x(fonts: &mut FontSystem, line: &str, goal_x: f32) -> usize {
   let goal = goal_x.max(0.0);
   let mut bounds = vec![0usize];
   let mut at = 0usize;
@@ -162,11 +167,66 @@ fn col_at_x(
   caret
 }
 
-/// Editable code page: TontooUI rows plus a caret rect.
+/// Word boundaries around a byte caret: alphanumeric plus `_`
+/// counts as word chars. Collapsed when the caret sits between
+/// words (double-click on a gap just places the caret).
+fn word_range(text: &str, caret: usize) -> (usize, usize) {
+  let caret = caret.min(text.len());
+  let is_word = |c: char| c.is_alphanumeric() || c == '_';
+  let mut a = caret;
+  while a > 0 {
+    match text[..a].chars().next_back() {
+      Some(c) if is_word(c) => a -= c.len_utf8(),
+      _ => break,
+    }
+  }
+  let mut b = caret;
+  while b < text.len() {
+    match text[b..].chars().next() {
+      Some(c) if is_word(c) => b += c.len_utf8(),
+      _ => break,
+    }
+  }
+  (a, b)
+}
+
+fn clipboard_buffer() -> &'static Mutex<String> {
+  static BUFFER: OnceLock<Mutex<String>> = OnceLock::new();
+  BUFFER.get_or_init(|| Mutex::new(String::new()))
+}
+
+fn clipboard_get() -> Option<String> {
+  clipboard_buffer().lock().ok().and_then(|guard| {
+    if guard.is_empty() {
+      None
+    } else {
+      Some(guard.clone())
+    }
+  })
+}
+
+fn clipboard_set(text: &str) {
+  if let Ok(mut guard) = clipboard_buffer().lock() {
+    *guard = text.to_string();
+  }
+}
+
+#[derive(Clone)]
+struct UndoState {
+  text: String,
+  caret: usize,
+  anchor: usize,
+  sel: bool,
+}
+
+/// Editable code page: TontooUI rows plus caret and selection.
 pub struct CodeEditor {
   text: String,
   caret: usize,
+  anchor: usize,
+  sel: bool,
   selected: bool,
+  pressing: bool,
   hovered: bool,
   dark: bool,
   mode: ThemeMode,
@@ -175,6 +235,10 @@ pub struct CodeEditor {
   rows: VStack,
   rect: (f32, f32, f32, f32),
   pending: Option<(f32, f32)>,
+  drag: Option<(f32, f32)>,
+  press_time: Option<Instant>,
+  undo: Vec<UndoState>,
+  redo: Vec<UndoState>,
 }
 
 impl CodeEditor {
@@ -184,7 +248,10 @@ impl CodeEditor {
     Self {
       text: initial,
       caret,
+      anchor: caret,
+      sel: false,
       selected: false,
+      pressing: false,
       hovered: false,
       dark: true,
       mode: ThemeMode::Dark,
@@ -193,6 +260,10 @@ impl CodeEditor {
       rows,
       rect: (0.0, 0.0, 0.0, 0.0),
       pending: None,
+      drag: None,
+      press_time: None,
+      undo: Vec::new(),
+      redo: Vec::new(),
     }
   }
 
@@ -222,27 +293,20 @@ impl CodeEditor {
   }
 
   fn lines(&self) -> Vec<String> {
-    let mut out: Vec<String> =
-      self.text.lines().map(|l| l.to_string()).collect();
-    if out.is_empty() {
-      out.push(String::new());
-    }
-    out
+    self.text.split('\n').map(|l| l.to_string()).collect()
   }
 
   fn line_col(&self) -> (usize, usize) {
     let caret = self.caret.min(self.text.len());
-    let mut line = 0usize;
     let mut start = 0usize;
     for (i, part) in self.text.split('\n').enumerate() {
       let end = start + part.len();
-      if caret <= end || i == self.text.split('\n').count() - 1 {
-        line = i;
-        return (line, caret - start);
+      if caret <= end {
+        return (i, caret - start);
       }
       start = end + 1;
     }
-    (line, 0)
+    (self.lines().len().saturating_sub(1), 0)
   }
 
   fn caret_from_line_col(&self, line: usize, col: usize) -> usize {
@@ -256,6 +320,119 @@ impl CodeEditor {
     self.text.len()
   }
 
+  fn snapshot(&self) -> UndoState {
+    UndoState {
+      text: self.text.clone(),
+      caret: self.caret,
+      anchor: self.anchor,
+      sel: self.sel,
+    }
+  }
+
+  fn push_undo(&mut self) {
+    let state = self.snapshot();
+    if self
+      .undo
+      .last()
+      .is_none_or(|top| top.text != state.text || top.caret != state.caret)
+    {
+      self.undo.push(state);
+      if self.undo.len() > CODE_UNDO_LIMIT {
+        self.undo.remove(0);
+      }
+    }
+    self.redo.clear();
+  }
+
+  fn restore(&mut self, state: UndoState) {
+    self.text = state.text;
+    self.caret = state.caret.min(self.text.len());
+    self.anchor = state.anchor.min(self.text.len());
+    self.sel = state.sel && self.anchor != self.caret;
+    self.rebuild();
+  }
+
+  pub fn undo_edit(&mut self) -> bool {
+    let Some(top) = self.undo.pop() else {
+      return false;
+    };
+    self.redo.push(self.snapshot());
+    self.restore(top);
+    true
+  }
+
+  pub fn redo_edit(&mut self) -> bool {
+    let Some(top) = self.redo.pop() else {
+      return false;
+    };
+    self.undo.push(self.snapshot());
+    self.restore(top);
+    true
+  }
+
+  fn selection_range(&self) -> Option<(usize, usize)> {
+    if self.sel && self.anchor != self.caret {
+      let a = self.anchor.min(self.text.len());
+      let b = self.caret.min(self.text.len());
+      Some((a.min(b), a.max(b)))
+    } else {
+      None
+    }
+  }
+
+  fn selected_text(&self) -> String {
+    match self.selection_range() {
+      Some((a, b)) => self.text[a..b].to_string(),
+      None => String::new(),
+    }
+  }
+
+  pub fn select_all(&mut self) {
+    self.anchor = 0;
+    self.caret = self.text.len();
+    self.sel = !self.text.is_empty();
+  }
+
+  fn collapse(&mut self) {
+    self.anchor = self.caret;
+    self.sel = false;
+  }
+
+  fn delete_selection(&mut self) -> bool {
+    let Some((a, b)) = self.selection_range() else {
+      return false;
+    };
+    self.push_undo();
+    self.text.replace_range(a..b, "");
+    self.caret = a;
+    self.anchor = a;
+    self.sel = false;
+    self.rebuild();
+    true
+  }
+
+  pub fn copy_selection(&mut self) -> bool {
+    let selected = self.selected_text();
+    if selected.is_empty() {
+      return false;
+    }
+    clipboard_set(&selected);
+    true
+  }
+
+  pub fn cut_selection(&mut self) -> bool {
+    if !self.copy_selection() {
+      return false;
+    }
+    self.delete_selection()
+  }
+
+  pub fn paste_clipboard(&mut self) {
+    if let Some(text) = clipboard_get() {
+      self.insert(&text);
+    }
+  }
+
   fn insert(&mut self, content: &str) {
     let clean: String = content
       .chars()
@@ -264,17 +441,28 @@ impl CodeEditor {
     if clean.is_empty() {
       return;
     }
+    self.push_undo();
+    if let Some((a, b)) = self.selection_range() {
+      self.text.replace_range(a..b, "");
+      self.caret = a;
+    }
     let caret = self.caret.min(self.text.len());
     self.text.insert_str(caret, &clean);
     self.caret = caret + clean.len();
+    self.anchor = self.caret;
+    self.sel = false;
     self.rebuild();
   }
 
   fn backspace(&mut self) {
+    if self.delete_selection() {
+      return;
+    }
     let caret = self.caret.min(self.text.len());
     if caret == 0 {
       return;
     }
+    self.push_undo();
     let prev = self.text[..caret]
       .char_indices()
       .last()
@@ -282,10 +470,31 @@ impl CodeEditor {
       .unwrap_or(0);
     self.text.remove(prev);
     self.caret = prev;
+    self.anchor = prev;
     self.rebuild();
   }
 
-  fn step_left(&mut self) {
+  fn step_left(&mut self, extend: bool) {
+    if !extend {
+      if let Some((a, _)) = self.selection_range() {
+        self.caret = a;
+        self.collapse();
+        return;
+      }
+      let caret = self.caret.min(self.text.len());
+      if caret > 0 {
+        self.caret = self.text[..caret]
+          .char_indices()
+          .last()
+          .map(|(i, _)| i)
+          .unwrap_or(0);
+      }
+      self.collapse();
+      return;
+    }
+    if !self.sel {
+      self.anchor = self.caret;
+    }
     let caret = self.caret.min(self.text.len());
     if caret > 0 {
       self.caret = self.text[..caret]
@@ -294,9 +503,31 @@ impl CodeEditor {
         .map(|(i, _)| i)
         .unwrap_or(0);
     }
+    self.sel = self.anchor != self.caret;
   }
 
-  fn step_right(&mut self) {
+  fn step_right(&mut self, extend: bool) {
+    if !extend {
+      if let Some((_, b)) = self.selection_range() {
+        self.caret = b;
+        self.collapse();
+        return;
+      }
+      let caret = self.caret.min(self.text.len());
+      if caret < self.text.len() {
+        let rest = &self.text[caret..];
+        self.caret = rest
+          .char_indices()
+          .nth(1)
+          .map(|(i, _)| caret + i)
+          .unwrap_or(self.text.len());
+      }
+      self.collapse();
+      return;
+    }
+    if !self.sel {
+      self.anchor = self.caret;
+    }
     let caret = self.caret.min(self.text.len());
     if caret < self.text.len() {
       let rest = &self.text[caret..];
@@ -306,9 +537,12 @@ impl CodeEditor {
         .map(|(i, _)| caret + i)
         .unwrap_or(self.text.len());
     }
+    self.sel = self.anchor != self.caret;
   }
 
-  fn move_up_down_simple(&mut self, up: bool) {
+  fn move_up_down_simple(&mut self, up: bool, extend: bool) {
+    let before = self.caret;
+    let was_sel = self.sel;
     let lines = self.lines();
     let (line, col) = self.line_col();
     let next = if up {
@@ -318,6 +552,14 @@ impl CodeEditor {
     };
     let target_len = lines.get(next).map(|s| s.len()).unwrap_or(0);
     self.caret = self.caret_from_line_col(next, col.min(target_len));
+    if extend {
+      if !was_sel {
+        self.anchor = before;
+      }
+      self.sel = self.anchor != self.caret;
+    } else {
+      self.collapse();
+    }
   }
 
   fn caret_at_point(
@@ -336,6 +578,32 @@ impl CodeEditor {
     self.caret_from_line_col(line, col)
   }
 
+  fn finish_press(&mut self, caret: usize, now: Instant) {
+    let caret = caret.min(self.text.len());
+    let double = matches!(self.press_time, Some(t)
+      if now.duration_since(t).as_secs_f64() < CODE_DOUBLE_TAP_SECONDS);
+    if double {
+      self.press_time = None;
+      let (a, b) = word_range(&self.text, caret);
+      if a != b {
+        self.anchor = a;
+        self.caret = b;
+        self.sel = true;
+        return;
+      }
+    } else {
+      self.press_time = Some(now);
+    }
+    self.caret = caret;
+    self.anchor = caret;
+    self.sel = false;
+  }
+
+  fn finish_drag(&mut self, caret: usize) {
+    self.caret = caret.min(self.text.len());
+    self.sel = self.anchor != self.caret;
+  }
+
   /// Press handling: click inside arms a focus plus caret resolve
   /// on the next draw (caret mapping needs fonts); outside
   /// unfocuses at once.
@@ -344,10 +612,14 @@ impl CodeEditor {
     let (rx, ry, rw, rh) = self.rect;
     if x >= rx && x <= rx + rw && y >= ry && y <= ry + rh {
       self.selected = true;
+      self.pressing = true;
       self.pending = Some((x, y));
+      self.drag = None;
     } else {
       self.selected = false;
+      self.pressing = false;
       self.pending = None;
+      self.drag = None;
     }
   }
 
@@ -358,34 +630,50 @@ impl CodeEditor {
     }
   }
 
-  /// Key handling while focused: `Backspace` deletes, arrows move,
-  /// `Enter` splits the line, `ESC` unfocuses. Returns true consumed.
+  /// Key handling while focused: editing, selection, clipboard,
+  /// undo and redo. Returns true when consumed.
   pub fn press_key(&mut self, key: Key) -> bool {
     if !self.selected {
       return false;
     }
     match key {
       Key::Backspace => self.backspace(),
-      Key::Left => self.step_left(),
-      Key::Right => self.step_right(),
-      Key::Up => self.move_up_down_simple(true),
-      Key::Down => self.move_up_down_simple(false),
+      Key::Left => self.step_left(false),
+      Key::Right => self.step_right(false),
+      Key::Up => self.move_up_down_simple(true, false),
+      Key::Down => self.move_up_down_simple(false, false),
+      Key::SelectLeft => self.step_left(true),
+      Key::SelectRight => self.step_right(true),
+      Key::SelectUp => self.move_up_down_simple(true, true),
+      Key::SelectDown => self.move_up_down_simple(false, true),
       Key::Enter => self.insert("\n"),
+      Key::SelectAll => self.select_all(),
+      Key::Copy => {
+        self.copy_selection();
+      }
+      Key::Cut => {
+        self.cut_selection();
+      }
+      Key::Paste => self.paste_clipboard(),
+      Key::Undo => {
+        self.undo_edit();
+      }
+      Key::Redo => {
+        self.redo_edit();
+      }
       Key::Escape => {
         self.selected = false;
+        self.sel = false;
+        self.pressing = false;
         return true;
       }
-      _ => return false,
     }
     true
   }
 }
 
 impl View for CodeEditor {
-  fn measure(
-    &mut self,
-    fonts: &mut FontSystem,
-  ) -> (f32, f32) {
+  fn measure(&mut self, fonts: &mut FontSystem) -> (f32, f32) {
     let (w, h) = self.rows.measure(fonts);
     (w.max(300.0), h.max(self.lines().len() as f32 * CODE_LINE_H))
   }
@@ -410,7 +698,14 @@ impl View for CodeEditor {
   ) {
     if let Some((px, py)) = self.pending.take() {
       if self.selected {
-        self.caret = self.caret_at_point(fonts, px, py);
+        let caret = self.caret_at_point(fonts, px, py);
+        self.finish_press(caret, Instant::now());
+      }
+    }
+    if let Some((dx, dy)) = self.drag.take() {
+      if self.selected && self.pressing {
+        let caret = self.caret_at_point(fonts, dx, dy);
+        self.finish_drag(caret);
       }
     }
     for index in 0..self.rows.len() {
@@ -426,6 +721,50 @@ impl View for CodeEditor {
       }
     }
     self.rows.draw(scene, fonts, images);
+    let scale = fonts.scale as f64;
+    let px = |v: f32| v as f64 * scale;
+    // Selection wash, segmented per line.
+    if let Some((sa, sb)) = self.selection_range() {
+      let wash = {
+        let c = self.accent.to_rgba8();
+        Color::from_rgba8(
+          c.r,
+          c.g,
+          c.b,
+          (c.a as f32 * CODE_SELECTION_ALPHA).round() as u8,
+        )
+      };
+      let lines = self.lines();
+      let mut start = 0usize;
+      for (index, line) in lines.iter().enumerate() {
+        let end = start + line.len();
+        let lo = sa.max(start).min(end);
+        let hi = sb.max(start).min(end);
+        if lo < hi {
+          if let (Some(before), Some(within)) =
+            (line.get(..lo - start), line.get(..hi - start))
+          {
+            let x0 = advance_of(fonts, before);
+            let x1 = advance_of(fonts, within);
+            let cy = self.rect.1 + index as f32 * CODE_LINE_H;
+            let cx = self.rect.0 + CODE_GUTTER_W + CODE_GAP;
+            scene.fill(
+              Fill::NonZero,
+              Affine::IDENTITY,
+              &Brush::Solid(wash),
+              None,
+              &Rect::new(
+                px(cx + x0),
+                px(cy + 1.0),
+                px(cx + x1),
+                px(cy + CODE_LINE_H - 3.0),
+              ),
+            );
+          }
+        }
+        start = end + 1;
+      }
+    }
     if self.selected {
       let (line, col) = self.line_col();
       let lines = self.lines();
@@ -434,8 +773,6 @@ impl View for CodeEditor {
       let cx =
         self.rect.0 + CODE_GUTTER_W + CODE_GAP + advance_of(fonts, prefix);
       let cy = self.rect.1 + line as f32 * CODE_LINE_H;
-      let scale = fonts.scale as f64;
-      let px = |v: f32| v as f64 * scale;
       let accent = if self.focused {
         self.accent
       } else {
@@ -460,12 +797,18 @@ impl View for CodeEditor {
     self.press(x, y);
   }
 
-  fn mouse_up(&mut self, _x: f64, _y: f64) {}
+  fn mouse_up(&mut self, _x: f64, _y: f64) {
+    self.pressing = false;
+    self.pending = None;
+    self.drag = None;
+  }
 
   fn set_hover(&mut self, x: f32, y: f32) {
     let (rx, ry, rw, rh) = self.rect;
-    self.hovered =
-      x >= rx && x <= rx + rw && y >= ry && y <= ry + rh;
+    self.hovered = x >= rx && x <= rx + rw && y >= ry && y <= ry + rh;
+    if self.pressing && self.selected {
+      self.drag = Some((x, y));
+    }
   }
 
   fn text(&mut self, content: &str) {
@@ -523,11 +866,50 @@ mod tests {
     let mut ed = CodeEditor::new("ab".to_string());
     ed.selected = true;
     ed.caret = 1;
+    ed.anchor = 1;
     ed.insert("X");
     assert_eq!(ed.text_value(), "aXb");
     ed.backspace();
     assert_eq!(ed.text_value(), "ab");
     ed.insert("\n");
-    assert_eq!(ed.text_value().lines().count(), 2);
+    assert_eq!(ed.text_value().split('\n').count(), 2);
+  }
+
+  #[test]
+  fn select_all_copies_and_pastes() {
+    let mut ed = CodeEditor::new("hello".to_string());
+    ed.selected = true;
+    assert!(ed.press_key(Key::SelectAll));
+    assert_eq!(ed.selected_text(), "hello");
+    assert!(ed.press_key(Key::Copy));
+    ed.press_key(Key::Right);
+    assert!(ed.press_key(Key::Paste));
+    assert_eq!(ed.text_value(), "hellohello");
+  }
+
+  #[test]
+  fn cut_and_undo_redo_roundtrip() {
+    let mut ed = CodeEditor::new("hello".to_string());
+    ed.selected = true;
+    ed.press_key(Key::SelectAll);
+    assert!(ed.press_key(Key::Cut));
+    assert_eq!(ed.text_value(), "");
+    assert!(ed.press_key(Key::Undo));
+    assert_eq!(ed.text_value(), "hello");
+    assert!(ed.press_key(Key::Redo));
+    assert_eq!(ed.text_value(), "");
+  }
+
+  #[test]
+  fn shift_extends_selection() {
+    let mut ed = CodeEditor::new("abcd".to_string());
+    ed.selected = true;
+    ed.caret = 1;
+    ed.anchor = 1;
+    ed.sel = false;
+    assert!(ed.press_key(Key::SelectRight));
+    assert_eq!(ed.selected_text(), "b");
+    assert!(ed.press_key(Key::SelectRight));
+    assert_eq!(ed.selected_text(), "bc");
   }
 }

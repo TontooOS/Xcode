@@ -75,3 +75,4 @@ See [StartPage.md](StartPage.md) for details.
 - 2026-09-29: Breadcrumb and status bar removed from editor pages (code only).
 - 2026-09-29: Editor code via DocumentKit Rust highlighting with gray line gutters (SDK gains the missing `DocumentKit` module).
 - 2026-09-30: Editor shows editable 40-line Rust hello code in custom `CodeEditor` pages (click to focus like a normal text field, live highlight, memory only).
+- 2026-09-30: `CodeEditor` selects with drag, double-click and `Shift` plus arrows; `Ctrl+A/C/X/V/Z/Y` works with an in-memory clipboard and undo stack.
