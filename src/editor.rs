@@ -12,19 +12,19 @@
 //! spawned copy of this binary and closes its own window at once;
 //! `open_project_window` waits ~600ms first (old window visibly
 //! closes, short gap), then opens the 1100x700 editor fresh.
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::path::Path;
 use std::rc::Rc;
 
 use crate::code_editor::{CodeEditor, example_rust_code};
-use crate::project_files::list_project_files;
+use crate::project_files::{FileEntry, list_project_files};
 use crate::TontooUI::elements::{
-  Align, BasicText, BasicToolbar, BarSwitcher, BarSwitcherItem, FileImage,
-  HorizontalDivider, HStack, MenuItem, NestedMenu, RoundedRectangle,
-  SearchField, SFSymbolImage, ShapeFill, Sidebar, SidebarItem,
-  TextForeground, TextStyle, ToolbarItem, TrafficAction, View, VStack,
-  GROUP_BG_LIGHT, MENU_BTN_PAD_X, MENU_CHEV_GAP, MENU_CHEV_W,
-  SIDEBAR_BG_DARK,
+  Align, BasicOutlineGroup, BasicText, BasicToolbar, BarSwitcher,
+  BarSwitcherItem, FileImage, HorizontalDivider, HStack, MenuItem,
+  NestedMenu, OutlineNode, RoundedRectangle, SearchField, SFSymbolImage,
+  ShapeFill, Sidebar, SidebarItem, TextForeground, TextStyle, ToolbarItem,
+  TrafficAction, View, VStack, GROUP_BG_LIGHT, MENU_BTN_PAD_X,
+  MENU_CHEV_GAP, MENU_CHEV_W, SIDEBAR_BG_DARK,
 };
 use crate::TontooUI::renderer::window::{App, CursorKind, Key, Viewport, WindowCommand, run};
 use crate::TontooUI::renderer::{FontSystem, ImageLoader};
@@ -175,6 +175,82 @@ fn file_icon(name: &str) -> (&'static str, Option<Color>) {
   }
 }
 
+/// Build outline roots plus flat index paths from walker entries.
+/// Folders nest recursively (open), files carry type icons; flat
+/// order is the entries order, so index `i` owns page `i`.
+fn build_tree(entries: &[FileEntry]) -> (Vec<OutlineNode>, Vec<Vec<usize>>) {
+  fn level(
+    entries: &[FileEntry],
+    pos: &mut usize,
+    flat_paths: &mut Vec<Vec<usize>>,
+    path: Vec<usize>,
+    depth: usize,
+  ) -> Vec<OutlineNode> {
+    let mut nodes = Vec::new();
+    while *pos < entries.len() && entries[*pos].depth == depth {
+      let entry = &entries[*pos];
+      let mut node_path = path.clone();
+      node_path.push(nodes.len());
+      let name = entry.label.trim().to_string();
+      if entry.is_dir {
+        *pos += 1;
+        flat_paths.push(node_path.clone());
+        let kids = level(entries, pos, flat_paths, node_path, depth + 1);
+        let mut folder = OutlineNode::folder(name).expanded(true);
+        for kid in kids {
+          folder = folder.child(kid);
+        }
+        nodes.push(folder);
+      } else {
+        let (icon, tint) = file_icon(&entry.label);
+        let mut file = OutlineNode::file(name).icon(icon);
+        if let Some(tint) = tint {
+          file = file.icon_tint(tint);
+        }
+        nodes.push(file);
+        flat_paths.push(node_path);
+        *pos += 1;
+      }
+    }
+    nodes
+  }
+
+  let mut flat_paths = Vec::with_capacity(entries.len());
+  let mut pos = 0usize;
+  let roots = level(entries, &mut pos, &mut flat_paths, Vec::new(), 0);
+  (roots, flat_paths)
+}
+
+/// Point inside a logical rect.
+fn point_in_rect(r: (f32, f32, f32, f32), x: f32, y: f32) -> bool {
+  x >= r.0 && x <= r.0 + r.2 && y >= r.1 && y <= r.1 + r.3
+}
+
+impl EditorUi {
+  /// Sidebar background over the navigator rows (both tab overlays
+  /// share it so the flat rows never show through).
+  fn paint_column_bg(
+    scene: &mut Scene,
+    px: impl Fn(f32) -> f64 + Copy,
+    x: f32,
+    y0: f32,
+    w: f32,
+    y1: f32,
+    dark: bool,
+    focused: bool,
+  ) {
+    let bg = if dark { SIDEBAR_BG_DARK } else { GROUP_BG_LIGHT };
+    let bg = if focused { bg } else { desaturate(bg) };
+    scene.fill(
+      Fill::NonZero,
+      Affine::IDENTITY,
+      &Brush::Solid(bg),
+      None,
+      &Rect::new(px(x), px(y0), px(x + w), px(y1)),
+    );
+  }
+}
+
 /// Resolve a bundled `Resources/<file>` raster (device glyphs).
 fn resource_path(file: &str) -> std::path::PathBuf {
   let mut candidates = Vec::new();
@@ -261,6 +337,14 @@ pub struct EditorUi {
   warn_rects: Vec<(f32, f32, f32, f32)>,
   /// Navigator page count (one example page per row).
   page_total: usize,
+  /// Nested outline tree for the Files tab (covers the flat rows).
+  nav_tree: BasicOutlineGroup,
+  /// Flat row index to outline path (entries order).
+  tree_paths: Vec<Vec<usize>>,
+  /// Pending outline selection from `on_select`.
+  tree_sel: Rc<RefCell<Option<Vec<usize>>>>,
+  /// Placed tree rect for hit routing.
+  tree_rect: (f32, f32, f32, f32),
   /// Cached I-beam state for code pages (updated on hover).
   code_ibeam: Cell<bool>,
   /// Cached divider resize state for code pages (updated on hover).
@@ -275,26 +359,12 @@ impl EditorUi {
   pub fn new(project: &str, code: String) -> Self {
     // Built-in example rows (fallback without a project path).
     let file = file_stem(project);
-    let items = vec![
-      SidebarItem::new(project, "folder.fill"),
-      SidebarItem::new("Assets", "folder.fill"),
-      SidebarItem::new("ContentView", "doc.fill"),
-      SidebarItem::new("Info", "doc.fill"),
-      SidebarItem::new(file.clone(), "doc.fill"),
-    ];
-    let pages = vec![
-      CodeEditor::new(code.clone()),
-      CodeEditor::new(code.clone()),
-      CodeEditor::new(code.clone()),
-      CodeEditor::new(code.clone()),
-      CodeEditor::new(code),
-    ];
-    let warn_files = vec![
-      project.to_string(),
-      "Assets".to_string(),
-      "ContentView".to_string(),
-      "Info".to_string(),
-      file,
+    let entries = vec![
+      FileEntry { label: project.to_string(), is_dir: true, depth: 0 },
+      FileEntry { label: "Assets".to_string(), is_dir: true, depth: 1 },
+      FileEntry { label: "ContentView".to_string(), is_dir: false, depth: 1 },
+      FileEntry { label: "Info".to_string(), is_dir: false, depth: 1 },
+      FileEntry { label: file, is_dir: false, depth: 1 },
     ];
     let warn_specs = vec![
       (false, lang::t("issue.unused_var"), 4, 36),
@@ -303,7 +373,7 @@ impl EditorUi {
       (true, lang::t("issue.unresolved_import"), 2, 1),
       (false, lang::t("issue.missing_docs"), 4, 22),
     ];
-    Self::assemble(items, pages, FILE_INDEX, warn_files, warn_specs)
+    Self::from_entries(entries, code, FILE_INDEX, warn_specs)
   }
 
   /// Open a real project root: every row owns an identical example
@@ -317,25 +387,6 @@ impl EditorUi {
     let user = system_username();
     let file = file_stem(project);
     let code = example_code(&file, project, &user);
-    let items = entries
-      .iter()
-      .map(|entry| {
-        if entry.is_dir {
-          SidebarItem::new(entry.label.clone(), "folder.fill")
-        } else {
-          let (icon, tint) = file_icon(&entry.label);
-          let item = SidebarItem::new(entry.label.clone(), icon);
-          match tint {
-            Some(tint) => item.tint(tint),
-            None => item,
-          }
-        }
-      })
-      .collect::<Vec<_>>();
-    let pages = entries
-      .iter()
-      .map(|_| CodeEditor::new(code.clone()))
-      .collect::<Vec<_>>();
     let select = entries
       .iter()
       .position(|entry| !entry.is_dir && entry.label.trim().ends_with(".rs"))
@@ -345,10 +396,6 @@ impl EditorUi {
     } else {
       select
     };
-    let warn_files = entries
-      .iter()
-      .map(|entry| entry.label.trim().to_string())
-      .collect::<Vec<_>>();
     let warn_specs = vec![
       (false, lang::t("issue.unused_var"), select, 36),
       (true, lang::t("issue.type_mismatch"), select, 33),
@@ -356,7 +403,37 @@ impl EditorUi {
       (true, lang::t("issue.unresolved_import"), secondary, 1),
       (false, lang::t("issue.missing_docs"), select, 22),
     ];
-    Ok(Self::assemble(items, pages, select, warn_files, warn_specs))
+    Ok(Self::from_entries(entries, code, select, warn_specs))
+  }
+
+  /// Shared constructor from walker entries: flat sidebar rows plus
+  /// example pages, warning names plus specs, and the nested outline
+  /// tree mapping flat rows to outline paths.
+  fn from_entries(
+    entries: Vec<FileEntry>,
+    code: String,
+    select: usize,
+    warn_specs: Vec<(bool, String, usize, usize)>,
+  ) -> Self {
+    let items = entries
+      .iter()
+      .map(|entry| {
+        SidebarItem::new(
+          entry.label.clone(),
+          if entry.is_dir { "folder.fill" } else { "doc.fill" },
+        )
+      })
+      .collect::<Vec<_>>();
+    let pages = entries
+      .iter()
+      .map(|_| CodeEditor::new(code.clone()))
+      .collect::<Vec<_>>();
+    let warn_files = entries
+      .iter()
+      .map(|entry| entry.label.trim().to_string())
+      .collect::<Vec<_>>();
+    let (tree_nodes, flat_paths) = build_tree(&entries);
+    Self::assemble(items, pages, select, warn_files, warn_specs, tree_nodes, flat_paths)
   }
 
   fn assemble(
@@ -365,8 +442,23 @@ impl EditorUi {
     select: usize,
     warn_files: Vec<String>,
     warn_specs: Vec<(bool, String, usize, usize)>,
+    tree_nodes: Vec<OutlineNode>,
+    flat_paths: Vec<Vec<usize>>,
   ) -> Self {
     let page_total = pages.len();
+    // Nested outline tree for the Files tab (trailing chevron,
+    // remembered open state, animated). Selection reports through
+    // `tree_sel` and lands on the flat page in `draw`.
+    let tree_sel = Rc::new(RefCell::new(None::<Vec<usize>>));
+    let pending = tree_sel.clone();
+    let mut nav_tree = BasicOutlineGroup::new(tree_nodes)
+      .trailing_chevron(true)
+      .on_select(move |path| {
+        pending.borrow_mut().replace(path);
+      });
+    if let Some(path) = flat_paths.get(select).cloned() {
+      nav_tree.select(path);
+    }
     // Row icons parallel to the menu items below (`None` for headers
     // and dividers): the picked row shows here on top, display only.
     let device_icons = vec![
@@ -500,6 +592,10 @@ impl EditorUi {
       selected_warn: 0,
       warn_rects: Vec::new(),
       page_total,
+      nav_tree,
+      tree_paths: flat_paths,
+      tree_sel,
+      tree_rect: (0.0, 0.0, 0.0, 0.0),
       code_ibeam: Cell::new(false),
       divider_cursor: Cell::new(false),
       watcher: ThemeWatcher::new(),
@@ -569,10 +665,26 @@ impl EditorUi {
     self.selected_warn = index;
     self.nav_tab.set(0);
     self.nav_tabs.set_selected(0);
+    // Expand the ancestor folders so the jumped-to row is visible.
+    if let Some(path) = self.tree_paths.get(file).cloned() {
+      for depth in 1..path.len() {
+        self.nav_tree.set_expanded(&path[..depth], true);
+      }
+      self.nav_tree.select(path);
+    }
     self.sidebar.select(file);
     if let Some(page) = self.sidebar.page_mut(file) {
       if let Some(ed) = page.as_any_mut().downcast_mut::<CodeEditor>() {
         ed.goto_line(line);
+      }
+    }
+  }
+
+  /// Apply a pending outline selection to the flat page.
+  fn poll_tree_select(&mut self) {
+    if let Some(path) = self.tree_sel.borrow_mut().take() {
+      if let Some(flat) = self.tree_paths.iter().position(|p| *p == path) {
+        self.sidebar.select(flat);
       }
     }
   }
@@ -646,6 +758,8 @@ impl EditorUi {
     self.inspector.set_focused(focused);
     self.nav_tabs.set_theme(theme.mode, theme.glass);
     self.nav_tabs.set_focused(focused);
+    self.nav_tree.set_theme(palette.accent, dark);
+    self.nav_tree.set_focused(focused);
     self.warn_bg.set_fill(ShapeFill::Solid(palette.accent));
     self.warn_bg.set_focused(focused);
     // Warning rows: the jumped-to row shows white text and icon on
@@ -710,6 +824,9 @@ impl EditorUi {
       self.last_panel_open.set(open);
       self.apply_panel_open(open);
     }
+    // Outline selection lands on the flat page (same frame, so the
+    // content never flashes the wrong file).
+    self.poll_tree_select();
 
     // No titlebar: the sidebar owns the decoration (traffic lights
     // live in it) and fills the whole viewport.
@@ -728,23 +845,37 @@ impl EditorUi {
       NAV_TABS_H,
     );
     self.nav_tabs.draw(scene, fonts, images);
+    let search_top = viewport.y + viewport.height - SEARCH_PAD - SEARCH_H;
+    // Files tab: nested outline tree over the flat rows (trailing
+    // chevron, remembered open state, animated). The flat rows stay
+    // underneath for the pages; selection flows through the poll.
+    if self.nav_tab.get() == 0 {
+      let scale = fonts.scale as f64;
+      let px = |v: f32| v as f64 * scale;
+      let bg_y = viewport.y + WARN_TOP - 2.0;
+      Self::paint_column_bg(scene, px, viewport.x, bg_y, col_w, search_top, dark, focused);
+      let tree_y = viewport.y + WARN_TOP;
+      let tree_h = (search_top - tree_y).max(0.0);
+      self.nav_tree.place(fonts, viewport.x, tree_y, col_w, tree_h);
+      let clip = Rect::new(
+        px(viewport.x),
+        px(tree_y),
+        px(viewport.x + col_w),
+        px(tree_y + tree_h),
+      );
+      scene.push_clip_layer(Fill::NonZero, Affine::IDENTITY, &clip);
+      self.nav_tree.draw(scene, fonts, images);
+      scene.pop_layer();
+      self.tree_rect = (viewport.x, tree_y, col_w, tree_h);
+    }
     // Warnings tab: sidebar background over the file rows plus the
     // example issue rows with an accent wash behind the jumped-to
     // row. The content keeps showing the selected file.
     if self.nav_tab.get() == 1 {
-      let search_top = viewport.y + viewport.height - SEARCH_PAD - SEARCH_H;
       let bg_y = viewport.y + WARN_TOP - 2.0;
-      let bg = if dark { SIDEBAR_BG_DARK } else { GROUP_BG_LIGHT };
-      let bg = if focused { bg } else { desaturate(bg) };
       let scale = fonts.scale as f64;
       let px = |v: f32| v as f64 * scale;
-      scene.fill(
-        Fill::NonZero,
-        Affine::IDENTITY,
-        &Brush::Solid(bg),
-        None,
-        &Rect::new(px(viewport.x), px(bg_y), px(viewport.x + col_w), px(search_top)),
-      );
+      Self::paint_column_bg(scene, px, viewport.x, bg_y, col_w, search_top, dark, focused);
       let row_w = col_w - SEARCH_PAD * 2.0 - 12.0;
       let mut rects = Vec::new();
       for (index, row) in self.warn_rows.iter_mut().enumerate() {
@@ -898,13 +1029,23 @@ impl EditorUi {
     // only takes focus and typing, it never searches. The inspector
     // pill only toggles the bottom panel. A warning press jumps to
     // its code at once so the content never flashes the wrong file.
-    self.sidebar.mouse_down(x, y);
+    // Tree presses skip the flat rows (the poll lands the page);
+    // the resize edge keeps the sidebar.
+    let tree_hit = self.nav_tab.get() == 0
+      && point_in_rect(self.tree_rect, x as f32, y as f32);
+    let resize = self.sidebar.wants_resize_cursor(x, y);
+    if !tree_hit || resize {
+      self.sidebar.mouse_down(x, y);
+    }
     self.search.mouse_down(x, y);
     self.run_stop.mouse_down(x, y);
     self.device.mouse_down(x, y);
     self.chev.mouse_down(x, y);
     self.inspector.mouse_down(x, y);
     self.nav_tabs.mouse_down(x, y);
+    if tree_hit && !resize {
+      self.nav_tree.mouse_down(x, y);
+    }
     if let Some(index) = self.hit_warn(x as f32, y as f32) {
       self.jump_to_issue(index);
     }
@@ -919,6 +1060,7 @@ impl EditorUi {
     self.chev.mouse_up(x, y);
     self.inspector.mouse_up(x, y);
     self.nav_tabs.mouse_up(x, y);
+    self.nav_tree.mouse_up(x, y);
   }
 
   pub fn mouse_wheel(&mut self, dx: f64, dy: f64) {
@@ -958,6 +1100,7 @@ impl EditorUi {
     self.chev.set_focused(focused);
     self.inspector.set_focused(focused);
     self.nav_tabs.set_focused(focused);
+    self.nav_tree.set_focused(focused);
     self.warn_bg.set_focused(focused);
     for row in self.warn_rows.iter_mut() {
       row.set_focused(focused);
@@ -1279,5 +1422,60 @@ mod tests {
     ui.nav_tab.set(1);
     ui.jump_to_issue(99);
     assert_eq!(ui.nav_index(), 1);
+  }
+
+  #[test]
+  fn tree_paths_mirror_flat_rows() {
+    let code = example_code("testApp", "test", "arlo");
+    let ui = EditorUi::new("test", code);
+    // Example rows: root folder with 4 children.
+    assert_eq!(ui.tree_paths.len(), ui.page_total);
+    assert_eq!(ui.tree_paths[0], vec![0]);
+    assert_eq!(ui.tree_paths[4], vec![0, 3]);
+    assert!(ui.nav_tree.is_expanded(&[0]));
+  }
+
+  #[test]
+  fn tree_selection_lands_on_flat_page() {
+    let code = example_code("testApp", "test", "arlo");
+    let mut ui = EditorUi::new("test", code);
+    // Outline callback fires synchronously; the poll maps the path.
+    ui.nav_tree.select(vec![0, 2]);
+    ui.poll_tree_select();
+    assert_eq!(ui.sidebar.selected_index(), 3);
+    // Unknown paths never touch the selection.
+    ui.nav_tree.select(vec![0, 2]);
+    ui.tree_sel.borrow_mut().replace(vec![9, 9]);
+    ui.poll_tree_select();
+    assert_eq!(ui.sidebar.selected_index(), 3);
+  }
+
+  #[test]
+  fn jump_expands_ancestor_folders() {
+    let parent = std::env::temp_dir()
+      .join(format!("xcode-ancestors-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&parent);
+    std::fs::create_dir_all(&parent).unwrap();
+    let root = crate::scaffold::create_project(
+      &parent,
+      "My App",
+      "",
+      "1.0",
+      "de.x",
+    )
+    .expect("scaffold");
+    let mut ui = EditorUi::open("My App", &root).expect("open");
+    ui.nav_tree.collapse_all();
+    ui.nav_tab.set(1);
+    ui.jump_to_issue(0);
+    // Ancestors of the jumped-to file stand open again.
+    let flat = ui.sidebar.selected_index();
+    let path = ui.tree_paths[flat].clone();
+    assert!(path.len() > 1);
+    for depth in 1..path.len() {
+      assert!(ui.nav_tree.is_expanded(&path[..depth]));
+    }
+    assert_eq!(ui.nav_index(), 0);
+    let _ = std::fs::remove_dir_all(&parent);
   }
 }
