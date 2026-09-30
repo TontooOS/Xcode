@@ -326,6 +326,13 @@ pub const LOG_LINE_H: f32 = 16.0;
 pub const PANEL_HEADER_H: f32 = 20.0;
 /// Panel label text size in logical px.
 pub const PANEL_LABEL_SIZE: f32 = 11.0;
+/// Fixed graph colors per metric (macOS system palette) so the
+/// sparkline lines stay distinguishable in both themes.
+pub const STAT_CPU: Color = Color::from_rgb8(0x0a, 0x84, 0xff);
+pub const STAT_GPU: Color = Color::from_rgb8(0xbf, 0x5a, 0xf2);
+pub const STAT_RAM: Color = Color::from_rgb8(0x30, 0xd1, 0x58);
+pub const STAT_DISK: Color = Color::from_rgb8(0xff, 0x9f, 0x0a);
+pub const STAT_NET: Color = Color::from_rgb8(0x64, 0xd2, 0xff);
 
 /// Editable code page: TontooUI rows plus caret, selection, the
 /// standard overlay `Scrollbar` and a collapsible bottom panel with
@@ -360,9 +367,12 @@ pub struct CodeEditor {
   /// Divider resize anchor: press Y plus panel height at press.
   divider_start: (f32, f32),
   divider_moved: bool,
-  /// Fake CPU/MEM samples (0..100, one per second).
+  /// Fake CPU/GPU/RAM/Disk/Net samples (0..100, one per second).
   samples_cpu: Vec<f32>,
-  samples_mem: Vec<f32>,
+  samples_gpu: Vec<f32>,
+  samples_ram: Vec<f32>,
+  samples_disk: Vec<f32>,
+  samples_net: Vec<f32>,
   /// Fake cargo log lines.
   logs: Vec<String>,
   /// Logs overlay bar plus model guard.
@@ -408,7 +418,10 @@ impl CodeEditor {
       divider_start: (0.0, 0.0),
       divider_moved: false,
       samples_cpu: Vec::new(),
-      samples_mem: Vec::new(),
+      samples_gpu: Vec::new(),
+      samples_ram: Vec::new(),
+      samples_disk: Vec::new(),
+      samples_net: Vec::new(),
       logs: Vec::new(),
       log_bar: Scrollbar::new(),
       log_model: (-1.0, -1.0),
@@ -1004,6 +1017,13 @@ impl CodeEditor {
     (48.0 + 26.0 * (t * 0.5 + phase).sin() + jitter).clamp(4.0, 98.0)
   }
 
+  fn push_sample(series: &mut Vec<f32>, value: f32) {
+    series.push(value);
+    if series.len() > STATS_CAP {
+      series.remove(0);
+    }
+  }
+
   /// One fake cargo log line per tick (build loop, example only).
   fn fake_log_line(tick: u64) -> String {
     match tick % 6 {
@@ -1025,14 +1045,11 @@ impl CodeEditor {
     }
     self.last_tick = now_secs;
     self.tick_count += 1;
-    self.samples_cpu.push(Self::fake_sample(self.tick_count, 0.0));
-    self.samples_mem.push(Self::fake_sample(self.tick_count, 2.1));
-    if self.samples_cpu.len() > STATS_CAP {
-      self.samples_cpu.remove(0);
-    }
-    if self.samples_mem.len() > STATS_CAP {
-      self.samples_mem.remove(0);
-    }
+    Self::push_sample(&mut self.samples_cpu, Self::fake_sample(self.tick_count, 0.0));
+    Self::push_sample(&mut self.samples_gpu, Self::fake_sample(self.tick_count, 1.3));
+    Self::push_sample(&mut self.samples_ram, Self::fake_sample(self.tick_count, 2.1));
+    Self::push_sample(&mut self.samples_disk, Self::fake_sample(self.tick_count, 2.8));
+    Self::push_sample(&mut self.samples_net, Self::fake_sample(self.tick_count, 3.6));
     self.logs.push(Self::fake_log_line(self.tick_count));
     if self.logs.len() > LOGS_CAP {
       let drop = self.logs.len() - LOGS_CAP;
@@ -1115,8 +1132,10 @@ impl CodeEditor {
     scene.stroke(&stroke, Affine::IDENTITY, &Brush::Solid(color), None, &path);
   }
 
-  /// Left panel stats: `Performance` header plus CPU and MEM labels
-  /// with sparklines (fake in-memory data, example only).
+  /// Left panel stats: `Performance` header plus a divider-free 2x2
+  /// grid (CPU top left, GPU top right, RAM bottom left, bottom right
+  /// split into Disk and Network) with one fixed-color sparkline per
+  /// metric (fake in-memory data, example only).
   fn draw_stats(
     &self,
     scene: &mut Scene,
@@ -1127,39 +1146,63 @@ impl CodeEditor {
       return;
     }
     let pad = 10.0;
-    let x = stats.0 + pad;
-    let w = (stats.2 - pad * 2.0).max(0.0);
+    let gap = 8.0;
+    let dim = self.dim();
     Self::draw_label(
       scene,
       fonts,
       "Performance",
       PANEL_LABEL_SIZE,
-      self.dim(),
-      x,
+      dim,
+      stats.0 + pad,
       stats.1 + 4.0,
     );
     let top = stats.1 + PANEL_HEADER_H;
-    let block_h = ((stats.3 - PANEL_HEADER_H) / 2.0).max(0.0);
-    let scale = fonts.scale;
-    for (row, title, samples, color) in [
-      (0, "CPU", &self.samples_cpu, self.accent),
-      (1, "MEM", &self.samples_mem, self.ink()),
-    ] {
-      let by = top + row as f32 * block_h;
-      let value = samples.last().copied().unwrap_or(0.0).round() as i64;
-      Self::draw_label(
-        scene,
-        fonts,
-        &format!("{title} {value}%"),
-        PANEL_LABEL_SIZE,
-        self.dim(),
-        x,
-        by + 2.0,
-      );
-      let gy = by + 16.0;
-      let gh = (block_h - 18.0).max(0.0);
-      Self::draw_spark(scene, scale, samples, x, gy, w, gh, color);
+    let grid_w = (stats.2 - pad * 2.0).max(0.0);
+    let grid_h = (stats.3 - PANEL_HEADER_H).max(0.0);
+    let col_w = ((grid_w - gap) / 2.0).max(0.0);
+    let row_h = (grid_h / 2.0).max(0.0);
+    let sub_w = ((col_w - gap) / 2.0).max(0.0);
+    let x0 = stats.0 + pad;
+    let x1 = x0 + col_w + gap;
+    let cpu = self.samples_cpu.last().copied().unwrap_or(0.0);
+    let gpu = self.samples_gpu.last().copied().unwrap_or(0.0);
+    let ram = self.samples_ram.last().copied().unwrap_or(0.0);
+    let disk = self.samples_disk.last().copied().unwrap_or(0.0);
+    let net = self.samples_net.last().copied().unwrap_or(0.0);
+    let cells = [
+      (x0, top, col_w, row_h, format!("CPU {:.0}%", cpu), &self.samples_cpu, STAT_CPU),
+      (x1, top, col_w, row_h, format!("GPU {:.0}%", gpu), &self.samples_gpu, STAT_GPU),
+      (x0, top + row_h, col_w, row_h, format!("RAM {:.0}%", ram), &self.samples_ram, STAT_RAM),
+      (x1, top + row_h, sub_w, row_h, format!("Disk {:.0} MB/s", disk * 3.2), &self.samples_disk, STAT_DISK),
+      (x1 + sub_w + gap, top + row_h, sub_w, row_h, format!("Network {:.0} Mb/s", net * 1.8), &self.samples_net, STAT_NET),
+    ];
+    for (cx, cy, cw, ch, label, samples, color) in cells {
+      Self::draw_metric(scene, fonts, dim, cx, cy, cw, ch, &label, samples, color);
     }
+  }
+
+  /// One stats cell: dim label on top, colorful sparkline below.
+  /// Cells are spaced, never divided by rules.
+  fn draw_metric(
+    scene: &mut Scene,
+    fonts: &mut FontSystem,
+    dim: Color,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    label: &str,
+    samples: &[f32],
+    color: Color,
+  ) {
+    if w <= 0.0 || h <= 0.0 {
+      return;
+    }
+    Self::draw_label(scene, fonts, label, PANEL_LABEL_SIZE, dim, x, y + 2.0);
+    let gy = y + 16.0;
+    let gh = (h - 18.0).max(0.0);
+    Self::draw_spark(scene, fonts.scale, samples, x, gy, w, gh, color);
   }
 
   /// Right panel logs: `Logs` header plus the fake cargo lines on
@@ -1630,6 +1673,11 @@ mod tests {
     ed.tick(2.0);
     assert_eq!(ed.sample_count(), 2);
     assert_eq!(ed.log_lines().len(), 2);
+    // All five metric series sample together.
+    assert_eq!(ed.samples_gpu.len(), 2);
+    assert_eq!(ed.samples_ram.len(), 2);
+    assert_eq!(ed.samples_disk.len(), 2);
+    assert_eq!(ed.samples_net.len(), 2);
   }
 
   #[test]
