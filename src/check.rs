@@ -23,7 +23,33 @@ use crate::Foundation::serialization::JsonValue;
 
 /// Idle delay after the last keystroke before a check starts.
 pub const CHECK_IDLE_DELAY: Duration = Duration::from_millis(2500);
-/// Max diagnostics kept per run (the warnings list stays usable).
+
+/// Resolve the cargo binary: `CARGO` env wins (rustup sets it),
+/// then well-known install spots, then plain `PATH` lookup. The
+/// editor process (spawned through the supervisor chain) does not
+/// always inherit the shell `PATH`, so bare `"cargo"` alone would
+/// fail silently and the panel would show zero errors forever.
+pub fn cargo_program() -> String {
+  if let Ok(env) = std::env::var("CARGO") {
+    if !env.trim().is_empty() {
+      return env;
+    }
+  }
+  let mut candidates = Vec::new();
+  if let Ok(home) = std::env::var("HOME") {
+    if !home.trim().is_empty() {
+      candidates.push(PathBuf::from(home).join(".cargo").join("bin").join("cargo"));
+    }
+  }
+  candidates.push(PathBuf::from("/root/.cargo/bin/cargo"));
+  candidates.push(PathBuf::from("/usr/local/cargo/bin/cargo"));
+  for path in candidates {
+    if path.is_file() {
+      return path.to_string_lossy().to_string();
+    }
+  }
+  "cargo".to_string()
+}/// Max diagnostics kept per run (the warnings list stays usable).
 pub const MAX_DIAGNOSTICS: usize = 200;
 /// Max title chars per warning row (rustc messages can be long).
 pub const MAX_TITLE_CHARS: usize = 140;
@@ -163,7 +189,9 @@ pub fn spawn_check(
 ) {
   thread::spawn(move || {
     let manifest = root.join("Cargo.toml");
-    let child = Command::new("cargo")
+    let program = cargo_program();
+    eprintln!("[xcode-check] start gen={generation} root={}", root.display());
+    let child = Command::new(&program)
       .arg("check")
       .arg("--message-format=json")
       .arg("--color=never")
@@ -175,7 +203,10 @@ pub fn spawn_check(
       .spawn();
     let mut child = match child {
       Ok(child) => child,
-      Err(_) => return,
+      Err(err) => {
+        eprintln!("[xcode-check] spawn failed ({program}): {err}");
+        return;
+      }
     };
     let stdout = child.stdout.take();
     if let Ok(mut slot) = child_slot.lock() {
@@ -205,6 +236,10 @@ pub fn spawn_check(
       return;
     }
     if ran {
+      eprintln!(
+        "[xcode-check] done gen={generation} diagnostics={}",
+        diagnostics.len()
+      );
       let _ = tx.send(CheckResult { generation, revision, diagnostics });
     }
   });
@@ -263,6 +298,64 @@ mod tests {
     let title = diagnostic_title(&diag);
     assert!(title.chars().count() <= MAX_TITLE_CHARS + 3);
     assert!(title.ends_with("..."));
+  }
+
+  #[test]
+  fn cargo_program_prefers_cargo_env() {
+    let prev = std::env::var("CARGO").ok();
+    std::env::set_var("CARGO", "/custom/cargo");
+    assert_eq!(cargo_program(), "/custom/cargo");
+    match prev {
+      Some(value) => std::env::set_var("CARGO", value),
+      None => std::env::remove_var("CARGO"),
+    }
+    assert!(!cargo_program().trim().is_empty());
+  }
+
+  #[test]
+  fn worker_reports_real_cargo_errors() {
+    use std::sync::mpsc;
+    // Zero-dependency fixture with the exact two error shapes from
+    // the bug report (E0433 plus E0425 with a `:::` help section).
+    let dir = std::env::temp_dir()
+      .join(format!("xcode-check-e2e-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+      dir.join("Cargo.toml"),
+      "[package]\nname = \"hello\"\nversion = \"27.0.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("src").join("main.rs"), "mod app;\n\nfn main() {}\n").unwrap();
+    std::fs::write(
+      dir.join("src").join("app.rs"),
+      "use TontoI::renderer::window::App;\n\npub struct HelloApp {\n  watcher: ThWatcher,\n}\n",
+    )
+    .unwrap();
+    let (tx, rx) = mpsc::channel();
+    spawn_check(
+      dir.clone(),
+      1,
+      1,
+      Arc::new(AtomicBool::new(false)),
+      Arc::new(Mutex::new(None)),
+      tx,
+    );
+    let result = rx
+      .recv_timeout(Duration::from_secs(120))
+      .expect("check result");
+    assert_eq!(result.generation, 1);
+    assert_eq!(result.revision, 1);
+    assert_eq!(result.diagnostics.len(), 2, "{:?}", result.diagnostics);
+    assert!(result.diagnostics.iter().any(|d| d.error
+      && d.file == "src/app.rs"
+      && d.line == 1
+      && d.code.as_deref() == Some("E0433")));
+    assert!(result.diagnostics.iter().any(|d| d.error
+      && d.file == "src/app.rs"
+      && d.line == 4
+      && d.code.as_deref() == Some("E0425")));
+    let _ = std::fs::remove_dir_all(&dir);
   }
 
   #[test]

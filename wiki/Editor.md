@@ -154,7 +154,13 @@ next to `XCODE_PROJECT_NAME`).
   `check.indexing` (`Indexing Files...`) label sits left of the
   performance pill. A keystroke after the job start cancels it (the
   child is killed) and a fresh job starts once typing stops again;
-  stale generations are dropped. JSON parses through Foundation
+  stale generations are dropped. The cargo binary resolves through
+  `cargo_program` (`CARGO` env, then `~/.cargo/bin/cargo`,
+  `/root/.cargo/bin/cargo`, `/usr/local/cargo/bin/cargo`, then
+  `PATH`, since the supervisor chain does not always inherit the
+  shell path). The worker logs `[xcode-check] start`, `done` (with
+  the diagnostic count) and `spawn failed` to stderr, so a missing
+  binary or a hanging run is visible in the terminal. JSON parses through Foundation
   `JsonValue` (serde-free); only `compiler-message` entries with
   `error` or `warning` level survive, mapped to their primary span.
   `apply_check_result` replaces the warnings list (What plus file
