@@ -21,6 +21,7 @@ mod code_editor;
 mod editor;
 mod icon;
 mod lang;
+mod project_files;
 mod projects;
 mod scaffold;
 mod sheet;
@@ -45,7 +46,7 @@ use TontooUI::theme::{ThemeMode, ThemeWatcher};
 use vello::Scene;
 use vello::peniko::Color;
 
-use crate::editor::PROJECT_ENV;
+use crate::editor::{PROJECT_ENV, PROJECT_PATH_ENV};
 use crate::projects::{ProjectRecord, load_projects};
 use crate::sheet::NewProjectForm;
 
@@ -97,8 +98,15 @@ const MODE_START: &str = "start";
 const OPEN_EXIT: i32 = 42;
 
 /// Supervisor protocol line announcing the project to open.
-fn open_line(name: &str) -> String {
-  format!("OPEN:{name}")
+fn open_line(name: &str, path: &str) -> String {
+  format!("OPEN:{name}\t{path}")
+}
+
+/// Parse a supervisor protocol line into project name plus path.
+fn parse_open(line: &str) -> Option<(String, String)> {
+  let rest = line.strip_prefix("OPEN:")?;
+  let (name, path) = rest.split_once('\t')?;
+  Some((name.to_string(), path.to_string()))
 }
 
 struct StartPage {
@@ -266,8 +274,8 @@ impl StartPage {
   /// Report an opened project to the supervisor and close this
   /// window at once: the supervisor runs the big editor next. Piped
   /// stdout is block-buffered, so the line is flushed explicitly.
-  fn emit_open(&self, name: &str) {
-    println!("{}", open_line(name));
+  fn emit_open(&self, name: &str, path: &str) {
+    println!("{}", open_line(name, path));
     let _ = std::io::Write::flush(&mut std::io::stdout());
     self.opened.set(true);
     self.close_requested.set(true);
@@ -382,10 +390,11 @@ impl App for StartPage {
     // at once.
     if let Some(record) = self.sheet.child_mut().take_created() {
       let name = record.display_name().to_string();
+      let path = record.path.clone();
       self.records.push(record);
       self.rebuild_rows();
       self.selected = self.rows.len().saturating_sub(1);
-      self.emit_open(&name);
+      self.emit_open(&name, &path);
     }
     if !self.sheet.is_visible() {
       self.sheet.child_mut().reset();
@@ -550,7 +559,8 @@ impl App for StartPage {
       if double {
         if let Some(record) = self.records.get(index) {
           let name = record.display_name().to_string();
-          self.emit_open(&name);
+          let path = record.path.clone();
+          self.emit_open(&name, &path);
         }
       }
     }
@@ -604,11 +614,16 @@ impl App for StartPage {
 fn main() {
   lang::init();
   // Editor handoff without CLI: a spawned copy carries the project
-  // name in the environment, waits out the gap, then opens big.
+  // name plus path in the environment, waits out the gap, then
+  // opens big.
   if let Ok(name) = std::env::var(PROJECT_ENV) {
     let name = name.trim().to_string();
     if !name.is_empty() {
-      editor::open_project_window(name);
+      let path = std::env::var(PROJECT_PATH_ENV)
+        .ok()
+        .map(|path| path.trim().to_string())
+        .filter(|path| !path.is_empty());
+      editor::open_project_window(name, path);
       return;
     }
   }
@@ -650,11 +665,11 @@ fn supervise() -> ! {
       std::process::exit(1);
     }
   };
-  let mut opened: Option<String> = None;
+  let mut opened: Option<(String, String)> = None;
   if let Some(out) = start.stdout.take() {
     for line in BufReader::new(out).lines().map_while(Result::ok) {
-      if let Some(name) = line.strip_prefix("OPEN:") {
-        opened = Some(name.to_string());
+      if let Some((name, path)) = parse_open(&line) {
+        opened = Some((name, path));
       } else {
         println!("{line}");
       }
@@ -662,8 +677,14 @@ fn supervise() -> ! {
   }
   let code = start.wait().ok().and_then(|s| s.code()).unwrap_or(1);
   if code == OPEN_EXIT {
-    if let Some(name) = opened.filter(|n| !n.trim().is_empty()) {
-      match Command::new(&exe).env(PROJECT_ENV, name).status() {
+    if let Some((name, path)) =
+      opened.filter(|(name, _)| !name.trim().is_empty())
+    {
+      match Command::new(&exe)
+        .env(PROJECT_ENV, name)
+        .env(PROJECT_PATH_ENV, path)
+        .status()
+      {
         Ok(status) => std::process::exit(status.code().unwrap_or(1)),
         Err(err) => {
           eprintln!("cannot open editor: {err}");
@@ -691,7 +712,13 @@ mod tests {
   #[test]
   fn supervisor_protocol_is_stable() {
     // Starter and supervisor agree on these instead of CLI args.
-    assert_eq!(open_line("MyApp"), "OPEN:MyApp");
+    assert_eq!(open_line("MyApp", "/tmp/MyApp"), "OPEN:MyApp\t/tmp/MyApp");
+    assert_eq!(
+      parse_open("OPEN:MyApp\t/tmp/My App"),
+      Some(("MyApp".to_string(), "/tmp/My App".to_string()))
+    );
+    assert_eq!(parse_open("OPEN:no-tab-here"), None);
+    assert_eq!(parse_open("hello"), None);
     assert_eq!(OPEN_EXIT, 42);
     assert_eq!(MODE_START, "start");
   }

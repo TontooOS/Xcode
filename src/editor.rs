@@ -13,9 +13,11 @@
 //! `open_project_window` waits ~600ms first (old window visibly
 //! closes, short gap), then opens the 1100x700 editor fresh.
 use std::cell::Cell;
+use std::path::Path;
 use std::rc::Rc;
 
 use crate::code_editor::{CodeEditor, example_rust_code};
+use crate::project_files::list_project_files;
 use crate::TontooUI::elements::{
   Align, BasicText, BasicToolbar, BarSwitcher, BarSwitcherItem, FileImage,
   HorizontalDivider, HStack, MenuItem, NestedMenu, RoundedRectangle,
@@ -35,6 +37,8 @@ use vello::peniko::{Brush, Color, Fill};
 
 /// Env handoff carrying the project name into the editor process.
 pub const PROJECT_ENV: &str = "XCODE_PROJECT_NAME";
+/// Env handoff carrying the project path into the editor process.
+pub const PROJECT_PATH_ENV: &str = "XCODE_PROJECT_PATH";
 /// Gap between the old window closing and the editor opening.
 const OPEN_DELAY_MS: u64 = 600;
 /// Editor window size: much bigger than the 420x585 start page.
@@ -224,6 +228,8 @@ pub struct EditorUi {
   selected_warn: usize,
   /// Placed warning row rects for tap jumps.
   warn_rects: Vec<(f32, f32, f32, f32)>,
+  /// Navigator page count (one example page per row).
+  page_total: usize,
   /// Cached I-beam state for code pages (updated on hover).
   code_ibeam: Cell<bool>,
   /// Cached divider resize state for code pages (updated on hover).
@@ -236,14 +242,94 @@ pub struct EditorUi {
 
 impl EditorUi {
   pub fn new(project: &str, code: String) -> Self {
+    // Built-in example rows (fallback without a project path).
     let file = file_stem(project);
     let items = vec![
       SidebarItem::new(project, "folder.fill"),
       SidebarItem::new("Assets", "folder.fill"),
       SidebarItem::new("ContentView", "doc.fill"),
       SidebarItem::new("Info", "doc.fill"),
-      SidebarItem::new(file, "doc.fill"),
+      SidebarItem::new(file.clone(), "doc.fill"),
     ];
+    let pages = vec![
+      CodeEditor::new(code.clone()),
+      CodeEditor::new(code.clone()),
+      CodeEditor::new(code.clone()),
+      CodeEditor::new(code.clone()),
+      CodeEditor::new(code),
+    ];
+    let warn_files = vec![
+      project.to_string(),
+      "Assets".to_string(),
+      "ContentView".to_string(),
+      "Info".to_string(),
+      file,
+    ];
+    let warn_specs = vec![
+      (false, lang::t("issue.unused_var"), 4, 36),
+      (true, lang::t("issue.type_mismatch"), 4, 33),
+      (false, lang::t("issue.trailing_ws"), 4, 9),
+      (true, lang::t("issue.unresolved_import"), 2, 1),
+      (false, lang::t("issue.missing_docs"), 4, 22),
+    ];
+    Self::assemble(items, pages, FILE_INDEX, warn_files, warn_specs)
+  }
+
+  /// Open a real project root: every row owns an identical example
+  /// page (clicks stay no-ops), the first `.rs` row is preselected
+  /// and carries the example warnings.
+  pub fn open(project: &str, root: &Path) -> Result<Self, String> {
+    if !root.is_dir() {
+      return Err(format!("missing project dir: {}", root.display()));
+    }
+    let entries = list_project_files(root);
+    let user = system_username();
+    let file = file_stem(project);
+    let code = example_code(&file, project, &user);
+    let items = entries
+      .iter()
+      .map(|entry| {
+        SidebarItem::new(
+          entry.label.clone(),
+          if entry.is_dir { "folder.fill" } else { "doc.fill" },
+        )
+      })
+      .collect::<Vec<_>>();
+    let pages = entries
+      .iter()
+      .map(|_| CodeEditor::new(code.clone()))
+      .collect::<Vec<_>>();
+    let select = entries
+      .iter()
+      .position(|entry| !entry.is_dir && entry.label.trim().ends_with(".rs"))
+      .unwrap_or(0);
+    let secondary = if entries.len() > 1 {
+      (select + 1) % entries.len()
+    } else {
+      select
+    };
+    let warn_files = entries
+      .iter()
+      .map(|entry| entry.label.trim().to_string())
+      .collect::<Vec<_>>();
+    let warn_specs = vec![
+      (false, lang::t("issue.unused_var"), select, 36),
+      (true, lang::t("issue.type_mismatch"), select, 33),
+      (false, lang::t("issue.trailing_ws"), select, 9),
+      (true, lang::t("issue.unresolved_import"), secondary, 1),
+      (false, lang::t("issue.missing_docs"), select, 22),
+    ];
+    Ok(Self::assemble(items, pages, select, warn_files, warn_specs))
+  }
+
+  fn assemble(
+    items: Vec<SidebarItem>,
+    pages: Vec<CodeEditor>,
+    select: usize,
+    warn_files: Vec<String>,
+    warn_specs: Vec<(bool, String, usize, usize)>,
+  ) -> Self {
+    let page_total = pages.len();
     // Row icons parallel to the menu items below (`None` for headers
     // and dividers): the picked row shows here on top, display only.
     let device_icons = vec![
@@ -270,13 +356,7 @@ impl EditorUi {
       lang::t("menu.utils"),
       lang::t("menu.export"),
     ];
-    let code_pages = [
-      CodeEditor::new(code.clone()),
-      CodeEditor::new(code.clone()),
-      CodeEditor::new(code.clone()),
-      CodeEditor::new(code.clone()),
-      CodeEditor::new(code),
-    ];
+    let code_pages = pages;
     let mut sidebar = Sidebar::new(items);
     for page in code_pages {
       sidebar = sidebar.page(page);
@@ -289,7 +369,7 @@ impl EditorUi {
     // holds chevrons left, the device menu center and the collapse
     // pill right instead.
     sidebar.set_title(String::new());
-    sidebar.select(FILE_INDEX);
+    sidebar.select(select);
     // The element defaults item labels to hand-set white, which wins
     // over the theme in light mode: clear the override once so labels
     // follow `set_theme` (dark `#d8d9d9`, light `#272727`).
@@ -314,20 +394,10 @@ impl EditorUi {
     ])
     .selected(0)
     .on_select(move |index| tab_flip.set(index));
-    let warn_files = vec![
-      project.to_string(),
-      "Assets".to_string(),
-      "ContentView".to_string(),
-      "Info".to_string(),
-      file_stem(project),
-    ];
-    let warn_items = vec![
-      WarnItem { error: false, title: lang::t("issue.unused_var"), file: 4, line: 36 },
-      WarnItem { error: true, title: lang::t("issue.type_mismatch"), file: 4, line: 33 },
-      WarnItem { error: false, title: lang::t("issue.trailing_ws"), file: 4, line: 9 },
-      WarnItem { error: true, title: lang::t("issue.unresolved_import"), file: 2, line: 1 },
-      WarnItem { error: false, title: lang::t("issue.missing_docs"), file: 4, line: 22 },
-    ];
+    let warn_items = warn_specs
+      .into_iter()
+      .map(|(error, title, file, line)| WarnItem { error, title, file, line })
+      .collect::<Vec<_>>();
     let warn_rows = warn_items
       .iter()
       .map(|item| warn_row(item.icon(), &item.title, &item.subtitle(&warn_files)))
@@ -389,6 +459,7 @@ impl EditorUi {
         .fill(Color::from_rgb8(0x00, 0x7a, 0xff)),
       selected_warn: 0,
       warn_rects: Vec::new(),
+      page_total,
       code_ibeam: Cell::new(false),
       divider_cursor: Cell::new(false),
       watcher: ThemeWatcher::new(),
@@ -399,20 +470,16 @@ impl EditorUi {
   }
 
   fn theme_code_pages(&mut self, accent: Color, mode: ThemeMode, dark: bool, focused: bool) {
-    for index in 0..5 {
-      if let Some(page) = self.sidebar.page_mut(index) {
-        if let Some(ed) = page.as_any_mut().downcast_mut::<CodeEditor>() {
-          ed.set_theme(accent, mode, dark);
-          ed.set_focused(focused);
-        }
-      }
-    }
+    self.each_page(|ed| {
+      ed.set_theme(accent, mode, dark);
+      ed.set_focused(focused);
+    });
   }
 
   /// Hand every page its own file diagnostics (line plus
   /// severity) so marked lines render badge, number and wash.
   fn sync_diagnostics(&mut self) {
-    for index in 0..5 {
+    for index in 0..self.page_total {
       let markers: Vec<(usize, bool)> = self
         .warn_items
         .iter()
@@ -430,25 +497,13 @@ impl EditorUi {
   /// Advance fake stats and logs on every page with the frame time
   /// (one sample plus one log line per second, example only).
   fn tick_code_pages(&mut self, now_secs: f64) {
-    for index in 0..5 {
-      if let Some(page) = self.sidebar.page_mut(index) {
-        if let Some(ed) = page.as_any_mut().downcast_mut::<CodeEditor>() {
-          ed.tick(now_secs);
-        }
-      }
-    }
+    self.each_page(|ed| ed.tick(now_secs));
   }
 
   /// Fold or unfold the bottom panel on every page (the inspector
   /// pill flips the switch, `draw` applies its edges).
   fn apply_panel_open(&mut self, open: bool) {
-    for index in 0..5 {
-      if let Some(page) = self.sidebar.page_mut(index) {
-        if let Some(ed) = page.as_any_mut().downcast_mut::<CodeEditor>() {
-          ed.set_collapsed(!open);
-        }
-      }
-    }
+    self.each_page(|ed| ed.set_collapsed(!open));
   }
 
   /// Same as the inspector pill click (flips the switch and applies
@@ -487,24 +542,28 @@ impl EditorUi {
     self.nav_tab.get()
   }
 
-  fn refresh_code_ibeam(&mut self) {
-    let mut hovered = false;
-    let mut divider = false;
-    for index in 0..5 {
+  /// Run over every example page (navigator rows own them 1:1).
+  fn each_page(&mut self, mut f: impl FnMut(&mut CodeEditor)) {
+    for index in 0..self.page_total {
       if let Some(page) = self.sidebar.page_mut(index) {
         if let Some(ed) = page.as_any_mut().downcast_mut::<CodeEditor>() {
-          if ed.wants_text_cursor() {
-            hovered = true;
-          }
-          if ed.wants_divider_cursor() {
-            divider = true;
-          }
-          if hovered && divider {
-            break;
-          }
+          f(ed);
         }
       }
     }
+  }
+
+  fn refresh_code_ibeam(&mut self) {
+    let mut hovered = false;
+    let mut divider = false;
+    self.each_page(|ed| {
+      if ed.wants_text_cursor() {
+        hovered = true;
+      }
+      if ed.wants_divider_cursor() {
+        divider = true;
+      }
+    });
     self.code_ibeam.set(hovered);
     self.divider_cursor.set(divider);
   }
@@ -876,11 +935,17 @@ struct EditorApp {
 }
 
 impl EditorApp {
-  fn new(project: String) -> Self {
+  fn new(project: String, path: Option<String>) -> Self {
     let user = system_username();
     let file = file_stem(&project);
     let code = example_code(&file, &project, &user);
-    let ui = EditorUi::new(&project, code);
+    // Real project rows when the handoff carries a valid dir,
+    // built-in example rows otherwise.
+    let ui = match path.filter(|path| Path::new(path).is_dir()) {
+      Some(path) => EditorUi::open(&project, Path::new(&path))
+        .unwrap_or_else(|_| EditorUi::new(&project, code)),
+      None => EditorUi::new(&project, code),
+    };
     Self { ui }
   }
 }
@@ -959,10 +1024,10 @@ impl App for EditorApp {
 
 /// Open the big editor window for a project: waits out the gap after
 /// the starter window closed, then runs fresh (no CLI involved).
-pub fn open_project_window(project: String) {
+pub fn open_project_window(project: String, path: Option<String>) {
   std::thread::sleep(std::time::Duration::from_millis(OPEN_DELAY_MS));
   let title = project.clone();
-  let app = EditorApp::new(project);
+  let app = EditorApp::new(project, path);
   if let Err(err) = run(&title, EDITOR_W, EDITOR_H, app) {
     eprintln!("error: {err}");
     std::process::exit(1);
@@ -1004,9 +1069,10 @@ mod tests {
 
   #[test]
   fn project_env_key_is_stable() {
-    // The starter and the editor child agree on this key instead of
-    // CLI arguments.
+    // The starter and the editor child agree on these keys instead
+    // of CLI arguments.
     assert_eq!(PROJECT_ENV, "XCODE_PROJECT_NAME");
+    assert_eq!(PROJECT_PATH_ENV, "XCODE_PROJECT_PATH");
   }
 
   #[test]
@@ -1030,7 +1096,7 @@ mod tests {
     assert!(ui.panel_open());
     ui.toggle_panel();
     assert!(!ui.panel_open());
-    for index in 0..5 {
+    for index in 0..ui.page_total {
       let page = ui.sidebar.page_mut(index).expect("page");
       let ed = page
         .as_any_mut()
@@ -1040,6 +1106,51 @@ mod tests {
     }
     ui.toggle_panel();
     assert!(ui.panel_open());
+  }
+
+  #[test]
+  fn open_lists_real_files_without_target() {
+    let parent = std::env::temp_dir()
+      .join(format!("xcode-open-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&parent);
+    std::fs::create_dir_all(&parent).unwrap();
+    let root = crate::scaffold::create_project(
+      &parent,
+      "My App",
+      "",
+      "1.0",
+      "de.x",
+    )
+    .expect("scaffold");
+    std::fs::create_dir_all(root.join("target")).unwrap();
+    std::fs::write(root.join("target").join("x"), "x").unwrap();
+    let mut ui = EditorUi::open("My App", &root).expect("open");
+    // Real rows (more than the 5 example ones), no target row, and
+    // the first `.rs` row preselected with the example warnings.
+    assert!(ui.page_total > 5);
+    for index in 0..ui.page_total {
+      let page = ui.sidebar.page_mut(index).expect("page");
+      assert!(page.as_any_mut().downcast_mut::<CodeEditor>().is_some());
+    }
+    let entries = crate::project_files::list_project_files(&root);
+    assert_eq!(entries.len(), ui.page_total);
+    assert!(!entries.iter().any(|entry| entry.label.contains("target")));
+    let first_rs = entries
+      .iter()
+      .position(|entry| !entry.is_dir && entry.label.trim().ends_with(".rs"))
+      .expect("rs file");
+    assert_eq!(ui.sidebar.selected_index(), first_rs);
+    // Warnings attach to real rows only.
+    for item in &ui.warn_items {
+      assert!(item.file < ui.page_total);
+    }
+    let _ = std::fs::remove_dir_all(&parent);
+  }
+
+  #[test]
+  fn open_rejects_missing_dir() {
+    let missing = std::path::Path::new("/definitely/not/here-xcode");
+    assert!(EditorUi::open("x", missing).is_err());
   }
 
   #[test]

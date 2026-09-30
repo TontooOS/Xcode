@@ -50,7 +50,7 @@ pages: narrow windows squeeze the code, wide windows use everything.
 | `bar` | `Sidebar` traffic | All three traffic lights working via `press()`; drags via `drag_rect()` |
 | `pills` | `BasicToolbar` | Single dead Run/Stop pair (`play.fill`, divider, `stop.fill`) at the sidebar top right edge, centered on the traffic row: hover/press tint only, nothing fires; content title via `set_title` (`{project} › My Mac`, `ed.device`) |
 | `topbar` | `FileImage` + `BasicToolbar` + `NestedMenu` + pills | 22px `Resources/computer.png` glyph left of the `My Computer` text-menu at 15px (`button_font`, `menu.*` keys, sections Devices/Build/Utilities with `computer.png`/`wrench.png`/`up.png` row icons via the new `MenuItem::icon` API); the picked row reflects on top (button label plus glyph, display only) on a 36px glass pill: the pill centers on the content middle right of the sidebar and wraps a compact group (glyph plus gap plus button text plus gap plus chevron) with equal padding, so icon, text and chevron sit centered inside; the button width derives from the button text only (not the widest dropdown row) and the menu stays vertically centered in the pill; dead chevron pair (`chevron.left`, divider, `chevron.right`) at the content left; notes placeholder pill (`chart.line.uptrend.xyaxis`, round 36px circle) at the content right (hover and press tint only, toggles the bottom panel open or closed); no content title, no collapse button; `HorizontalDivider` between pills and editor; all example only |
-| `navigator` | `SidebarItem` + `BarSwitcher` + warnings overlay | Project root plus `Assets`, `ContentView`, `Info` and file rows, preselected on the file row; `collapsible(false)` (never collapses, no collapse button), search hidden (`search_field(false)`), toggle pill hidden; a `BarSwitcher` tab switcher with icon plus label cells (`folder` `Files` default, warning triangle `Warnings & Errors`) sits in the gap above the rows; the warnings tab covers the rows with an example list (3 yellow warnings plus 2 red errors with tinted icons, file and line subtitles) while the content keeps showing the selected file; clicking a warning jumps back to `Files`, selects its file and moves the caret to its line; mouse reaches the element natively (hover, selection, wheel, resize cursor); `set_item_text(None)` clears the element's white default so labels follow the theme (light `#272727`) |
+| `navigator` | `SidebarItem` + `BarSwitcher` + warnings overlay | Project files below the tabs (see `open`): rows list every file and folder with indented names, clicks only move the native selection and change nothing (every page shows the same example code); `collapsible(false)` (never collapses, no collapse button), search hidden (`search_field(false)`), toggle pill hidden; a `BarSwitcher` tab switcher with icon plus label cells (`folder` `Files` default, warning triangle `Warnings & Errors`) sits in the gap above the rows; the warnings tab covers the rows with an example list (3 yellow warnings plus 2 red errors with tinted icons, file and line subtitles) while the content keeps showing the selected file; clicking a warning jumps back to `Files`, selects its file and moves the caret to its line; mouse reaches the element natively (hover, selection, wheel, resize cursor); `set_item_text(None)` clears the element's white default so labels follow the theme (light `#272727`) |
 | `search` | `SearchField` | Functionless capsule (`ed.search`) pinned to the sidebar bottom: 28px tall, full column width even while resizing; takes focus and typing, never searches |
 | `editor` | `CodeEditor` pages | Editable 40-line Rust hello example through the DocumentKit Rust tokenizer (`highlight` → `Span`s: bold keywords, underlined strings, dimmed italic comments, gaps plain; per line, example code uses no multi-line constructs); gray `Footnote` gutter numbers share the code text size so they stay glued to their lines; lines carrying a warning or error always show a tinted gutter badge, a tinted line number and a matching line wash like the reference (red errors, yellow warnings); spans rebuild on every edit and on theme text change; spans rebuild on every edit and on theme text change; click inside focuses with a caret, drag selects, double-click selects the word, typing replaces the highlight, `Backspace` deletes, `Enter` splits, arrows move (`Shift` extends),   `ESC` unfocuses, `Ctrl+A/C/X/V/Z/Y` selects all, copies, cuts, pastes, undoes and redoes through an in-memory clipboard; caret, click mapping and the selection wash measure through the same rich monospace DocumentKit layout the code rows render with (bold runs included), so the   highlight hugs the letters exactly; caret, click mapping,
   selection, gutter badges and line washes all use the row pitch
@@ -62,6 +62,19 @@ pages: narrow windows squeeze the code, wide windows use everything.
 ```rust
 pub fn file_stem(display_name: &str) -> String
 ```
+
+### Project files
+
+`EditorUi::open` lists the opened project root for the navigator:
+recursive walk with indented display names (two spaces per depth),
+folders first then files, alphabetical; `target` folders, dotfiles
+and dotfolders (including `.git`) plus symlinks are skipped, at most
+500 rows. Every row owns an identical example `CodeEditor` page, so
+clicks are no-ops; the first `.rs` file row is preselected and
+carries the example warnings. Without a valid project path the
+editor falls back to the built-in example rows. The supervisor hands
+the path over as `OPEN:<name>\t<path>` (env `XCODE_PROJECT_PATH`
+next to `XCODE_PROJECT_NAME`).
 
 ### Rules
 
