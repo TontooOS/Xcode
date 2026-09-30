@@ -17,6 +17,7 @@
 //! daemon live through `ThemeWatcher` (Dark `#1B2022` / Light
 //! `#FFFFFF`).
 
+mod code_editor;
 mod editor;
 mod icon;
 mod lang;

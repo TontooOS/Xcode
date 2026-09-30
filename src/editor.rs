@@ -4,11 +4,9 @@
 //! traffic lights (owned by the sidebar), a dead Run/Stop pill pair at
 //! the sidebar top right (no callbacks), a non-collapsible file
 //! navigator with one preselected file, a functionless search capsule
-//! stretched across the sidebar bottom, dead example Swift code,
-//! breadcrumb and status bar. The element feels alive (hover, press states,
-//! selection, resize) but clicks trigger no actions: there are no
-//! callbacks, all pages are identical and nothing is ever saved, built
-//! or run.
+//! stretched across the sidebar bottom and editable example Rust code.
+//! Code pages accept clicks and typing like a normal text field;
+//! edits stay in memory only, nothing is ever saved, built or run.
 //!
 //! Handoff without CLI: the starter sets `XCODE_PROJECT_NAME` on a
 //! spawned copy of this binary and closes its own window at once;
@@ -17,12 +15,11 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use crate::DocumentKit::{SyntaxLang, highlight_syntax as highlight};
+use crate::code_editor::{CodeEditor, example_rust_code};
 use crate::TontooUI::elements::{
-  Align, BasicText, BasicToolbar, FileImage, FormattedText, HStack,
-  HorizontalDivider, MenuItem, NestedMenu, SearchField, Sidebar, SidebarItem,
-  Span, TextAlignment, TextForeground, TextStyle, ToolbarItem,
-  TrafficAction, View, VStack, MENU_BTN_PAD_X, MENU_CHEV_GAP, MENU_CHEV_W,
+  BasicToolbar, FileImage, HorizontalDivider, MenuItem, NestedMenu,
+  SearchField, Sidebar, SidebarItem, ToolbarItem, TrafficAction, View,
+  MENU_BTN_PAD_X, MENU_CHEV_GAP, MENU_CHEV_W,
 };
 use crate::TontooUI::renderer::window::{App, CursorKind, Key, Viewport, WindowCommand, run};
 use crate::TontooUI::renderer::{FontSystem, ImageLoader};
@@ -72,9 +69,7 @@ pub fn file_stem(display_name: &str) -> String {
 }
 
 fn example_code(file: &str, project: &str, user: &str) -> String {
-  format!(
-    "//  {file}.swift\n//  {project}\n//\n//  Created by {user}.\n//\nimport SwiftUI\n\n@main\nstruct {file}: App {{\n    var body: some Scene {{\n        WindowGroup {{\n            ContentView()\n        }}\n    }}\n}}\n"
-  )
+  example_rust_code(file, project, user)
 }
 
 /// Resolve a bundled `Resources/<file>` raster (device glyphs).
@@ -113,77 +108,6 @@ fn png(file: &str) -> String {
   resource_path(file).to_string_lossy().to_string()
 }
 
-/// Gray gutter width for line numbers.
-const GUTTER_W: f32 = 30.0;
-
-/// One source line: gray number plus DocumentKit-highlighted code.
-/// Both sides share one `TextStyle` size so numbers stay glued to
-/// their lines. Highlighting runs per line (exact for `//` comments
-/// and single-line strings; the example code uses no multi-line
-/// constructs).
-fn code_row(no: usize, spans: Vec<Span>) -> HStack {
-  HStack::new()
-    .spacing(8.0)
-    .align(Align::Center)
-    .child(
-      BasicText::new((no + 1).to_string())
-        .style(TextStyle::Footnote)
-        .foreground(TextForeground::Secondary)
-        .alignment(TextAlignment::Trailing)
-        .width(GUTTER_W),
-    )
-    .child(FormattedText::spans(spans).style(TextStyle::Footnote))
-}
-
-/// Map one source line through the DocumentKit Rust tokenizer into
-/// `Span`s (gaps stay plain code). Colors follow `SpanKind` per theme.
-fn highlight_spans(line: &str, dark: bool) -> Vec<Span> {
-  if line.is_empty() {
-    return vec![Span::new(" ").code()];
-  }
-  let mut out = Vec::new();
-  let mut cursor = 0;
-  for s in highlight(SyntaxLang::Rust, line) {
-    if s.start > cursor {
-      if let Some(t) = line.get(cursor..s.start) {
-        out.push(Span::new(t).code());
-      }
-    }
-    if let Some(t) = line.get(s.start..s.end) {
-      let mut span = Span::new(t).code().color(s.kind.color(dark));
-      if s.bold {
-        span = span.bold();
-      }
-      if s.italic {
-        span = span.italic();
-      }
-      if s.underline {
-        span = span.underline();
-      }
-      out.push(span);
-    }
-    cursor = cursor.max(s.end);
-  }
-  if let Some(t) = line.get(cursor..) {
-    if !t.is_empty() {
-      out.push(Span::new(t).code());
-    }
-  }
-  if out.is_empty() {
-    out.push(Span::new(" ").code());
-  }
-  out
-}
-
-/// Static editor page: highlighted code with gray line numbers.
-fn editor_page(lines: &[String], dark: bool) -> VStack {
-  let mut rows = VStack::new().spacing(2.0).align(Align::Leading);
-  for (no, line) in lines.iter().enumerate() {
-    rows = rows.child(code_row(no, highlight_spans(line, dark)));
-  }
-  rows
-}
-
 pub struct EditorUi {
   sidebar: Sidebar,
   search: SearchField,
@@ -208,10 +132,8 @@ pub struct EditorUi {
   menu_glass: BasicToolbar,
   /// Dead back/forward chevrons at the content left.
   chev: BasicToolbar,
-  /// Source lines behind the row views (rebuilt on theme change).
-  code_lines: Vec<String>,
-  /// Text color the row spans were built with.
-  code_text: Color,
+  /// Cached I-beam state for code pages (updated on hover).
+  code_ibeam: Cell<bool>,
   watcher: ThemeWatcher,
   focused: bool,
   bg: Color,
@@ -254,15 +176,18 @@ impl EditorUi {
       lang::t("menu.utils"),
       lang::t("menu.export"),
     ];
-    let code_lines: Vec<String> = code.lines().map(|l| l.to_string()).collect();
-    // Initial spans assume dark; the first draw rebuilds them in the
-    // live theme (see `wire_page`).
-    let mut sidebar = Sidebar::new(items)
-      .page(editor_page(&code_lines, true))
-      .page(editor_page(&code_lines, true))
-      .page(editor_page(&code_lines, true))
-      .page(editor_page(&code_lines, true))
-      .page(editor_page(&code_lines, true))
+    let code_pages = [
+      CodeEditor::new(code.clone()),
+      CodeEditor::new(code.clone()),
+      CodeEditor::new(code.clone()),
+      CodeEditor::new(code.clone()),
+      CodeEditor::new(code),
+    ];
+    let mut sidebar = Sidebar::new(items);
+    for page in code_pages {
+      sidebar = sidebar.page(page);
+    }
+    sidebar = sidebar
       .search_field(false)
       .toggle_button(false)
       .collapsible(false);
@@ -316,8 +241,7 @@ impl EditorUi {
         ToolbarItem::divider(),
         ToolbarItem::icon("chevron.right"),
       ]),
-      code_lines,
-      code_text: Color::TRANSPARENT,
+      code_ibeam: Cell::new(false),
       watcher: ThemeWatcher::new(),
       focused: true,
       bg: crate::TontooUI::renderer::window::BACKGROUND,
@@ -325,34 +249,30 @@ impl EditorUi {
     }
   }
 
-  /// Wire one page: theme for all texts; code spans rebuild when the
-  /// theme changed (fresh kind colors).
-  fn wire_page(
-    page: &mut dyn View,
-    mode: ThemeMode,
-    focused: bool,
-    lines: &[String],
-    dark: bool,
-    recolor: bool,
-  ) {
-    let Some(rows) = page.as_any_mut().downcast_mut::<VStack>() else {
-      return;
-    };
-    for (no, source) in lines.iter().enumerate() {
-      if let Some(row) = rows.child_mut::<HStack>(no) {
-        if let Some(gutter) = row.child_mut::<BasicText>(0) {
-          gutter.set_theme(mode);
-          gutter.set_focused(focused);
-        }
-          if let Some(code) = row.child_mut::<FormattedText>(1) {
-            if recolor {
-              code.set_source(highlight_spans(source, dark));
-            }
-          code.set_theme(mode);
-          code.set_focused(focused);
+  fn theme_code_pages(&mut self, accent: Color, mode: ThemeMode, dark: bool, focused: bool) {
+    for index in 0..5 {
+      if let Some(page) = self.sidebar.page_mut(index) {
+        if let Some(ed) = page.as_any_mut().downcast_mut::<CodeEditor>() {
+          ed.set_theme(accent, mode, dark);
+          ed.set_focused(focused);
         }
       }
     }
+  }
+
+  fn refresh_code_ibeam(&mut self) {
+    let mut hovered = false;
+    for index in 0..5 {
+      if let Some(page) = self.sidebar.page_mut(index) {
+        if let Some(ed) = page.as_any_mut().downcast_mut::<CodeEditor>() {
+          if ed.wants_text_cursor() {
+            hovered = true;
+            break;
+          }
+        }
+      }
+    }
+    self.code_ibeam.set(hovered);
   }
 
   pub fn draw(
@@ -401,16 +321,8 @@ impl EditorUi {
         self.computer.set_path(icon);
       }
     }
-    // Spans rebuild on theme text change (fresh kind colors).
-    let recolor = palette.text != self.code_text;
-    if recolor {
-      self.code_text = palette.text;
-    }
-    for index in 0..5 {
-      if let Some(page) = self.sidebar.page_mut(index) {
-        Self::wire_page(page, mode, focused, &self.code_lines, dark, recolor);
-      }
-    }
+    // Code pages follow the theme with live highlight colors.
+    self.theme_code_pages(palette.accent, mode, dark, focused);
 
     // No titlebar: the sidebar owns the decoration (traffic lights
     // live in it) and fills the whole viewport.
@@ -521,6 +433,7 @@ impl EditorUi {
     self.run_stop.mouse_move(x, y);
     self.device.mouse_move(x as f64, y as f64);
     self.chev.mouse_move(x, y);
+    self.refresh_code_ibeam();
   }
 
   pub fn mouse_down(&mut self, x: f64, y: f64) {
@@ -548,15 +461,21 @@ impl EditorUi {
   }
 
   pub fn type_text(&mut self, content: &str) {
+    // Search first while it holds focus, else the active code page.
+    // Edits stay in memory only.
     self.search.type_text(content);
+    self.sidebar.page_text(content);
   }
 
   pub fn key(&mut self, key: Key) -> bool {
-    self.search.key(key)
+    if self.search.key(key) {
+      return true;
+    }
+    self.sidebar.page_key(key)
   }
 
   pub fn wants_text_cursor(&self) -> bool {
-    self.search.wants_text_cursor()
+    self.search.wants_text_cursor() || self.code_ibeam.get()
   }
 
   pub fn wants_resize(&self, x: f64, y: f64) -> bool {
@@ -685,38 +604,13 @@ mod tests {
   }
 
   #[test]
-  fn example_code_mentions_names() {
+  fn example_code_is_40_line_rust() {
     let code = example_code("testApp", "test", "arlo");
+    assert_eq!(code.lines().count(), 40);
     assert!(code.contains("testApp"));
     assert!(code.contains("Created by arlo"));
-    assert!(code.contains("import SwiftUI"));
-  }
-
-  #[test]
-  fn highlight_spans_cover_everything() {
-    // Empty lines stay renderable.
-    assert!(!highlight_spans("", true).is_empty());
-    // Plain text without tokens stays one code span.
-    assert_eq!(highlight_spans("hello", true).len(), 1);
-    // Gap filling is exact: mapped spans equal tokenizer spans plus
-    // one plain span per uncovered gap, whatever the lexer finds.
-    for line in ["fn x() {} // hi", "let s = \"hi\";", "    ", "}"] {
-      let toks = highlight(SyntaxLang::Rust, line);
-      let mut gaps = 0;
-      let mut cursor = 0;
-      for t in &toks {
-        if t.start > cursor {
-          gaps += 1;
-        }
-        cursor = cursor.max(t.end);
-      }
-      if cursor < line.len() {
-        gaps += 1;
-      }
-      let mapped = highlight_spans(line, true).len();
-      let expected = toks.len() + gaps;
-      assert_eq!(mapped, expected.max(1), "line {line:?}");
-    }
+    assert!(code.contains("fn main"));
+    assert!(!code.contains("import SwiftUI"));
   }
 
   #[test]
