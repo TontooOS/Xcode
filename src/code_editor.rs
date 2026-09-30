@@ -17,7 +17,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use vello::Scene;
-use vello::kurbo::{Affine, BezPath, Cap, Join, Rect, Stroke};
+use vello::kurbo::{Affine, BezPath, Cap, Join, Line, Rect, Stroke};
 use vello::peniko::{Brush, Color, Fill};
 
 use crate::DocumentKit::{SyntaxLang, highlight_syntax as highlight};
@@ -29,7 +29,7 @@ use crate::TontooUI::elements::{
 };
 use crate::TontooUI::renderer::window::Key;
 use crate::TontooUI::renderer::{FontSystem, ImageLoader, RichSpan, draw_layout};
-use crate::TontooUI::theme::ThemeMode;
+use crate::TontooUI::theme::{ThemeMode, desaturate};
 
 /// Gray gutter width for line numbers.
 pub const CODE_GUTTER_W: f32 = 30.0;
@@ -367,6 +367,8 @@ pub struct CodeEditor {
   /// Divider resize anchor: press Y plus panel height at press.
   divider_start: (f32, f32),
   divider_moved: bool,
+  /// Divider strip hovered (accent highlight plus resize cursor).
+  divider_hover: bool,
   /// Fake CPU/GPU/RAM/Disk/Net samples (0..100, one per second).
   samples_cpu: Vec<f32>,
   samples_gpu: Vec<f32>,
@@ -417,6 +419,7 @@ impl CodeEditor {
       divider_drag: false,
       divider_start: (0.0, 0.0),
       divider_moved: false,
+      divider_hover: false,
       samples_cpu: Vec::new(),
       samples_gpu: Vec::new(),
       samples_ram: Vec::new(),
@@ -463,6 +466,12 @@ impl CodeEditor {
 
   pub fn panel_collapsed(&self) -> bool {
     self.collapsed
+  }
+
+  /// True while the divider strip hovers or a resize drag runs:
+  /// the app shows the resize cursor then, like the sidebar edge.
+  pub fn wants_divider_cursor(&self) -> bool {
+    self.divider_drag || self.divider_hover
   }
 
   pub fn log_lines(&self) -> &[String] {
@@ -1395,18 +1404,32 @@ impl View for CodeEditor {
       }
     }
     scene.pop_layer();
-    // Divider rule across the strip.
-    let rule = self.rule();
+    // Divider rule across the strip: accent plus wider while the
+    // strip hovers or drags, like the sidebar edge.
+    let grabbing = self.divider_drag || self.divider_hover;
+    let (dw, dc) = if grabbing {
+      (
+        2.0,
+        if self.focused {
+          self.accent
+        } else {
+          desaturate(self.accent)
+        },
+      )
+    } else {
+      (1.0, self.rule())
+    };
     let dy = divider.1 + divider.3 / 2.0;
-    scene.fill(
-      Fill::NonZero,
+    scene.stroke(
+      &Stroke::new(dw as f64 * scale),
       Affine::IDENTITY,
-      &Brush::Solid(rule),
+      &Brush::Solid(dc),
       None,
-      &Rect::new(px(divider.0), px(dy), px(divider.0 + divider.2), px(dy + 1.0)),
+      &Line::new((px(divider.0), px(dy)), (px(divider.0 + divider.2), px(dy))),
     );
     // Bottom panel: vertical split plus stats left, logs right.
     if !self.collapsed && panel.3 > 0.0 {
+      let rule = self.rule();
       let sx = stats.0 + stats.2;
       scene.fill(
         Fill::NonZero,
@@ -1440,6 +1463,7 @@ impl View for CodeEditor {
       self.divider_drag = false;
       self.divider_moved = false;
     }
+    self.divider_hover = point_in(self.zones().1, x as f32, y as f32);
     self.pressing = false;
     self.pending = None;
     self.drag = None;
@@ -1449,6 +1473,7 @@ impl View for CodeEditor {
     self.last_hover = (x, y);
     self.bar.mouse_move(x as f64, y as f64);
     self.log_bar.mouse_move(x as f64, y as f64);
+    self.divider_hover = self.divider_drag || point_in(self.zones().1, x, y);
     if self.divider_drag {
       let dy = self.divider_start.0 - y;
       if dy.abs() > PANEL_DRAG_SLOP {
@@ -1461,8 +1486,13 @@ impl View for CodeEditor {
       }
       return;
     }
+    // The divider keeps the resize cursor, never the I-beam.
     let (rx, ry, rw, rh) = self.rect;
-    self.hovered = x >= rx && x <= rx + rw && y >= ry && y <= ry + rh;
+    self.hovered = !self.divider_hover
+      && x >= rx
+      && x <= rx + rw
+      && y >= ry
+      && y <= ry + rh;
     if self.pressing && self.selected {
       self.drag = Some((x, y));
     }
@@ -1656,6 +1686,19 @@ mod tests {
     assert!((ed.panel_height() - 220.0).abs() < 0.01);
     <CodeEditor as View>::mouse_up(&mut ed, 200.0, 375.0);
     assert!(!ed.panel_collapsed());
+  }
+
+  #[test]
+  fn divider_hover_requests_resize_cursor() {
+    let mut ed = CodeEditor::new("hi".to_string());
+    ed.rect = (0.0, 0.0, 400.0, 600.0);
+    assert!(!ed.wants_divider_cursor());
+    // Divider strip 410..420.
+    <CodeEditor as View>::set_hover(&mut ed, 200.0, 415.0);
+    assert!(ed.wants_divider_cursor());
+    // Code area keeps the I-beam zone free of the resize cursor.
+    <CodeEditor as View>::set_hover(&mut ed, 200.0, 100.0);
+    assert!(!ed.wants_divider_cursor());
   }
 
   #[test]

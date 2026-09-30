@@ -140,6 +140,8 @@ pub struct EditorUi {
   notes_open: Rc<Cell<bool>>,
   /// Cached I-beam state for code pages (updated on hover).
   code_ibeam: Cell<bool>,
+  /// Cached divider resize state for code pages (updated on hover).
+  divider_cursor: Cell<bool>,
   watcher: ThemeWatcher,
   focused: bool,
   bg: Color,
@@ -258,6 +260,7 @@ impl EditorUi {
       inspector,
       notes_open,
       code_ibeam: Cell::new(false),
+      divider_cursor: Cell::new(false),
       watcher: ThemeWatcher::new(),
       focused: true,
       bg: crate::TontooUI::renderer::window::BACKGROUND,
@@ -290,17 +293,24 @@ impl EditorUi {
 
   fn refresh_code_ibeam(&mut self) {
     let mut hovered = false;
+    let mut divider = false;
     for index in 0..5 {
       if let Some(page) = self.sidebar.page_mut(index) {
         if let Some(ed) = page.as_any_mut().downcast_mut::<CodeEditor>() {
           if ed.wants_text_cursor() {
             hovered = true;
+          }
+          if ed.wants_divider_cursor() {
+            divider = true;
+          }
+          if hovered && divider {
             break;
           }
         }
       }
     }
     self.code_ibeam.set(hovered);
+    self.divider_cursor.set(divider);
   }
 
   pub fn draw(
@@ -526,7 +536,7 @@ impl EditorUi {
   }
 
   pub fn wants_resize(&self, x: f64, y: f64) -> bool {
-    self.sidebar.wants_resize_cursor(x, y)
+    self.sidebar.wants_resize_cursor(x, y) || self.divider_cursor.get()
   }
 
   pub fn set_focused(&mut self, focused: bool) {
@@ -610,10 +620,11 @@ impl App for EditorApp {
   }
 
   fn cursor(&self, x: f64, y: f64) -> CursorKind {
-    if self.ui.wants_text_cursor() {
-      CursorKind::Text
-    } else if self.ui.wants_resize(x, y) {
+    // Grab handles win over the I-beam (narrow zones by design).
+    if self.ui.wants_resize(x, y) {
       CursorKind::ResizeColumn
+    } else if self.ui.wants_text_cursor() {
+      CursorKind::Text
     } else {
       CursorKind::Default
     }
