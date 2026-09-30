@@ -12,10 +12,11 @@ use std::path::Path;
 /// Max navigator rows.
 pub const MAX_FILES: usize = 500;
 
-/// One navigator row: indented display name plus kind.
+/// One navigator row: indented display name, kind and depth.
 pub struct FileEntry {
   pub label: String,
   pub is_dir: bool,
+  pub depth: usize,
 }
 
 /// List `root` for the navigator (see module docs). Empty roots
@@ -29,7 +30,7 @@ pub fn list_project_files(root: &Path) -> Vec<FileEntry> {
       .and_then(|s| s.to_str())
       .unwrap_or("Project")
       .to_string();
-    out.push(FileEntry { label: name, is_dir: true });
+    out.push(FileEntry { label: name, is_dir: true, depth: 0 });
   }
   out.truncate(MAX_FILES);
   out
@@ -78,12 +79,14 @@ fn walk(dir: &Path, depth: usize, out: &mut Vec<FileEntry>) {
       out.push(FileEntry {
         label: format!("{}{name}", "  ".repeat(depth)),
         is_dir: true,
+        depth,
       });
       walk(&entry.path(), depth + 1, out);
     } else {
       out.push(FileEntry {
         label: format!("{}{name}", "  ".repeat(depth)),
         is_dir: false,
+        depth,
       });
     }
   }
@@ -137,12 +140,14 @@ mod tests {
       .find(|entry| entry.label == "src")
       .expect("src folder");
     assert!(src.is_dir);
+    assert_eq!(src.depth, 0);
     let app = entries
       .iter()
       .find(|entry| entry.label.trim() == "app.rs")
       .expect("app.rs");
     assert!(!app.is_dir);
     assert!(app.label.starts_with("  "));
+    assert_eq!(app.depth, 1);
     let _ = std::fs::remove_dir_all(root.parent().unwrap());
   }
 
