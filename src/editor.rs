@@ -420,15 +420,15 @@ impl EditorUi {
     let content_x = viewport.x + col_w;
     let content_w = (viewport.width - col_w).max(0.0);
     // Topbar row in the content toolbar zone: the TEXT centers on
-    // the window middle, the glyph hangs left of it, the glass pill
-    // spans symmetric around the text. Dead chevron pair at the
-    // content left.
+    // the content middle (right of the sidebar), the glyph hangs
+    // left of it, the glass pill spans symmetric around the text.
+    // Dead chevron pair at the content left.
     self.device.set_viewport(viewport.x, viewport.y, viewport.width, viewport.height);
     let (menu_w, menu_h) = self.device.measure(fonts);
     let label = self.device.button_text().to_string();
     let (tw, _) = FontSystem::layout_size(&fonts.layout_text(&label, DEVICE_FONT, Color::WHITE, None));
     let text_w = tw / fonts.scale;
-    let middle = viewport.x + viewport.width / 2.0;
+    let middle = content_x + content_w / 2.0;
     // NestedMenu draws button text at `menu_x + MENU_BTN_PAD_X`.
     let menu_x = middle - MENU_BTN_PAD_X - text_w / 2.0;
     let icon_x = menu_x - DEVICE_GAP - DEVICE_ICON;
