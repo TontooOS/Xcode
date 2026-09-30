@@ -77,7 +77,8 @@ See [StartPage.md](StartPage.md) for details.
 - 2026-09-30: Editor shows editable 40-line Rust hello code in custom `CodeEditor` pages (click to focus like a normal text field, live highlight, memory only).
 - 2026-09-30: `CodeEditor` selects with drag, double-click and `Shift` plus arrows; `Ctrl+A/C/X/V/Z/Y` works with an in-memory clipboard and undo stack.
 - 2026-09-30: `CodeEditor` selection wash, caret and click mapping measure through the rich monospace layout (fixes highlight sized like proportional text).
-- 2026-09-30: Bottom panel below the code with a drag divider (click collapses like a sidebar, drag resizes 100px..420px); left `Performance` stats with custom CPU/MEM sparklines sampling every 1s, right `Logs` with a fake cargo loop every 1s on a standard `Scrollbar`.
+- 2026-09-30: Bottom panel below the code with a drag divider (click collapses like a sidebar, drag resizes 100px..420px); left `Performance` stats with custom sparklines sampling every 1s, right `Logs` with a fake cargo loop every 1s on a standard `Scrollbar`.
 - 2026-09-30: Stats grid without inner dividers (CPU/GPU top, RAM bottom left, Disk/Network bottom right) with one fixed color per graph.
+- 2026-09-30: RAM value in MB; top-right pill is a `chart.line.uptrend.xyaxis` performance icon toggling the bottom panel open or closed.
 - 2026-09-30: Panel divider turns 2px accent while hovering or resizing like the sidebar edge, with the resize cursor.
 - 2026-09-30: Notes placeholder pill (`sidebar.right`, round circle) at the content top right (toggles a state for the later notes area, no panel yet); `CodeEditor` scrolls vertically with the wheel plus caret tracking.

@@ -132,12 +132,14 @@ pub struct EditorUi {
   menu_glass: BasicToolbar,
   /// Dead back/forward chevrons at the content left.
   chev: BasicToolbar,
-  /// Notes placeholder pill at the content right (`sidebar.right`):
-  /// hover and press tint only, toggles a state for the later notes
-  /// area, no panel yet.
+  /// Performance pill at the content right
+  /// (`chart.line.uptrend.xyaxis`, round circle): toggles the bottom
+  /// panel open or closed on every page.
   inspector: BasicToolbar,
-  /// Toggled by the inspector pill, reserved for the notes area.
-  notes_open: Rc<Cell<bool>>,
+  /// Bottom panel master switch, flipped by the inspector pill.
+  panel_open: Rc<Cell<bool>>,
+  /// Last applied switch state (divider taps stay per page).
+  last_panel_open: Cell<bool>,
   /// Cached I-beam state for code pages (updated on hover).
   code_ibeam: Cell<bool>,
   /// Cached divider resize state for code pages (updated on hover).
@@ -208,14 +210,15 @@ impl EditorUi {
     // over the theme in light mode: clear the override once so labels
     // follow `set_theme` (dark `#d8d9d9`, light `#272727`).
     sidebar.set_item_text(None);
-    // Notes placeholder state for the later notes area: the pill
-    // toggles it, no panel exists yet.
-    let notes_open = Rc::new(Cell::new(false));
-    let notes_toggle = notes_open.clone();
+    // Bottom panel master switch: the performance pill flips it,
+    // `draw` applies edges to every page (divider taps stay per
+    // page, see `apply_panel_open`).
+    let panel_open = Rc::new(Cell::new(true));
+    let panel_toggle = panel_open.clone();
     let inspector =
-      BasicToolbar::from_items(vec![ToolbarItem::icon("sidebar.right")])
+      BasicToolbar::from_items(vec![ToolbarItem::icon("chart.line.uptrend.xyaxis")])
         .round(true)
-        .on_action(move |_| notes_toggle.set(!notes_toggle.get()));
+        .on_action(move |_| panel_toggle.set(!panel_toggle.get()));
     Self {
       sidebar,
       search: SearchField::new(lang::t("ed.search")),
@@ -258,7 +261,8 @@ impl EditorUi {
         ToolbarItem::icon("chevron.right"),
       ]),
       inspector,
-      notes_open,
+      panel_open,
+      last_panel_open: Cell::new(true),
       code_ibeam: Cell::new(false),
       divider_cursor: Cell::new(false),
       watcher: ThemeWatcher::new(),
@@ -289,6 +293,27 @@ impl EditorUi {
         }
       }
     }
+  }
+
+  /// Fold or unfold the bottom panel on every page (the inspector
+  /// pill flips the switch, `draw` applies its edges).
+  fn apply_panel_open(&mut self, open: bool) {
+    for index in 0..5 {
+      if let Some(page) = self.sidebar.page_mut(index) {
+        if let Some(ed) = page.as_any_mut().downcast_mut::<CodeEditor>() {
+          ed.set_collapsed(!open);
+        }
+      }
+    }
+  }
+
+  /// Same as the inspector pill click (flips the switch and applies
+  /// it at once, so tests need no window).
+  pub fn toggle_panel(&mut self) {
+    let open = !self.panel_open.get();
+    self.panel_open.set(open);
+    self.last_panel_open.set(open);
+    self.apply_panel_open(open);
   }
 
   fn refresh_code_ibeam(&mut self) {
@@ -365,6 +390,13 @@ impl EditorUi {
     self.theme_code_pages(palette.accent, mode, dark, focused);
     // Fake stats and logs advance with the frame time.
     self.tick_code_pages(time_secs);
+    // Apply inspector pill edges to every page (divider taps stay
+    // per page and never touch the switch).
+    let open = self.panel_open.get();
+    if open != self.last_panel_open.get() {
+      self.last_panel_open.set(open);
+      self.apply_panel_open(open);
+    }
 
     // No titlebar: the sidebar owns the decoration (traffic lights
     // live in it) and fills the whole viewport.
@@ -551,9 +583,9 @@ impl EditorUi {
     self.inspector.set_focused(focused);
   }
 
-  /// Notes placeholder state toggled by the inspector pill.
-  pub fn notes_open(&self) -> bool {
-    self.notes_open.get()
+  /// Bottom panel master switch flipped by the inspector pill.
+  pub fn panel_open(&self) -> bool {
+    self.panel_open.get()
   }
 }
 
@@ -708,11 +740,23 @@ mod tests {
   }
 
   #[test]
-  fn notes_placeholder_starts_closed() {
-    // The inspector pill toggles a state for the later notes area;
-    // no panel exists yet, so a fresh editor reports closed.
+  fn performance_pill_toggles_bottom_panel() {
+    // Fresh editors show the bottom panel; the performance pill
+    // folds it away on every page and back.
     let code = example_code("testApp", "test", "arlo");
-    let ui = EditorUi::new("test", code);
-    assert!(!ui.notes_open());
+    let mut ui = EditorUi::new("test", code);
+    assert!(ui.panel_open());
+    ui.toggle_panel();
+    assert!(!ui.panel_open());
+    for index in 0..5 {
+      let page = ui.sidebar.page_mut(index).expect("page");
+      let ed = page
+        .as_any_mut()
+        .downcast_mut::<CodeEditor>()
+        .expect("code page");
+      assert!(ed.panel_collapsed());
+    }
+    ui.toggle_panel();
+    assert!(ui.panel_open());
   }
 }

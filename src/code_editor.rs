@@ -468,6 +468,12 @@ impl CodeEditor {
     self.collapsed
   }
 
+  /// Fold or unfold the bottom panel (the top-right performance
+  /// pill drives this on every page).
+  pub fn set_collapsed(&mut self, collapsed: bool) {
+    self.collapsed = collapsed;
+  }
+
   /// True while the divider strip hovers or a resize drag runs:
   /// the app shows the resize cursor then, like the sidebar edge.
   pub fn wants_divider_cursor(&self) -> bool {
@@ -1033,6 +1039,12 @@ impl CodeEditor {
     }
   }
 
+  /// RAM label in MB for a 16 GB machine (0..100 maps to the full
+  /// range), instead of a bare percent.
+  fn ram_text(value: f32) -> String {
+    format!("RAM {:.0} MB", value * 163.84)
+  }
+
   /// One fake cargo log line per tick (build loop, example only).
   fn fake_log_line(tick: u64) -> String {
     match tick % 6 {
@@ -1182,7 +1194,7 @@ impl CodeEditor {
     let cells = [
       (x0, top, col_w, row_h, format!("CPU {:.0}%", cpu), &self.samples_cpu, STAT_CPU),
       (x1, top, col_w, row_h, format!("GPU {:.0}%", gpu), &self.samples_gpu, STAT_GPU),
-      (x0, top + row_h, col_w, row_h, format!("RAM {:.0}%", ram), &self.samples_ram, STAT_RAM),
+      (x0, top + row_h, col_w, row_h, Self::ram_text(ram), &self.samples_ram, STAT_RAM),
       (x1, top + row_h, sub_w, row_h, format!("Disk {:.0} MB/s", disk * 3.2), &self.samples_disk, STAT_DISK),
       (x1 + sub_w + gap, top + row_h, sub_w, row_h, format!("Network {:.0} Mb/s", net * 1.8), &self.samples_net, STAT_NET),
     ];
@@ -1660,6 +1672,12 @@ mod tests {
     let ed = CodeEditor::new("hi".to_string());
     assert!(!ed.panel_collapsed());
     assert_eq!(ed.panel_height(), PANEL_DEFAULT_H);
+  }
+
+  #[test]
+  fn ram_label_shows_megabytes() {
+    assert_eq!(CodeEditor::ram_text(50.0), "RAM 8192 MB");
+    assert!(CodeEditor::ram_text(0.0).ends_with("MB"));
   }
 
   #[test]
