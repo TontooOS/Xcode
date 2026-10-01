@@ -39,6 +39,15 @@ pub struct BuildResult {
   pub binary: Option<PathBuf>,
 }
 
+/// What to build: the project root, an optional pre-clean and an
+/// optional isolated target dir (tests isolate parallel fixture
+/// builds; the app always uses the cargo default).
+pub struct BuildRequest {
+  pub root: PathBuf,
+  pub clean_first: bool,
+  pub target_dir: Option<PathBuf>,
+}
+
 /// One running `cargo build` (same single-job shape as the check).
 pub struct BuildJob {
   pub rx: std::sync::mpsc::Receiver<BuildResult>,
@@ -51,28 +60,45 @@ pub enum RunEvent {
   Line(String),
 }
 
-/// Spawn the background build: runs `cargo build`, collects rendered
-/// errors, resolves the binary on success and sends one result.
-/// Stops early (killing the child) once `cancel` flips.
+/// Spawn the background build: optional `cargo clean` first, then
+/// `cargo build`, collecting rendered errors, resolving the binary
+/// on success and sending one result. Stops early (killing the
+/// child) once `cancel` flips.
 pub fn spawn_build(
-  root: PathBuf,
+  request: BuildRequest,
   cancel: Arc<AtomicBool>,
   child_slot: Arc<Mutex<Option<Child>>>,
   tx: std::sync::mpsc::Sender<BuildResult>,
 ) {
   thread::spawn(move || {
-    let manifest = root.join("Cargo.toml");
-    eprintln!("[xcode-run] build root={}", root.display());
-    let child = Command::new(cargo_program())
+    let manifest = request.root.join("Cargo.toml");
+    eprintln!(
+      "[xcode-run] build root={} clean={}",
+      request.root.display(),
+      request.clean_first
+    );
+    if request.clean_first {
+      if !run_clean(&manifest, &request, &cancel, &child_slot) {
+        return;
+      }
+      if cancel.load(Ordering::Relaxed) {
+        return;
+      }
+    }
+    let mut build = Command::new(cargo_program());
+    build
       .arg("build")
       .arg("--message-format=json")
       .arg("--color=never")
       .arg("--manifest-path")
       .arg(&manifest)
-      .current_dir(&root)
+      .current_dir(&request.root)
       .stdout(Stdio::piped())
-      .stderr(Stdio::null())
-      .spawn();
+      .stderr(Stdio::null());
+    if let Some(dir) = &request.target_dir {
+      build.env("CARGO_TARGET_DIR", dir);
+    }
+    let child = build.spawn();
     let mut child = match child {
       Ok(child) => child,
       Err(err) => {
@@ -105,10 +131,70 @@ pub fn spawn_build(
     if cancel.load(Ordering::Relaxed) {
       return;
     }
-    let binary = if success { binary_for_manifest(&manifest) } else { None };
+    let binary = if success {
+      binary_for_manifest(&manifest, request.target_dir.as_deref())
+    } else {
+      None
+    };
     eprintln!("[xcode-run] build done success={success}");
     let _ = tx.send(BuildResult { success, errors, binary });
   });
+}
+
+/// Run `cargo clean` for the manifest (production builds start
+/// fresh). Returns false when cancelled or the spawn failed.
+fn run_clean(
+  manifest: &Path,
+  request: &BuildRequest,
+  cancel: &Arc<AtomicBool>,
+  child_slot: &Arc<Mutex<Option<Child>>>,
+) -> bool {
+  eprintln!("[xcode-run] clean root={}", request.root.display());
+  let mut clean = Command::new(cargo_program());
+  clean
+    .arg("clean")
+    .arg("--manifest-path")
+    .arg(manifest)
+    .current_dir(&request.root)
+    .stdout(Stdio::null())
+    .stderr(Stdio::null());
+  if let Some(dir) = &request.target_dir {
+    clean.env("CARGO_TARGET_DIR", dir);
+  }
+  let child = clean.spawn();
+  let child = match child {
+    Ok(child) => child,
+    Err(err) => {
+      eprintln!("[xcode-run] clean spawn failed: {err}");
+      return false;
+    }
+  };
+  if let Ok(mut slot) = child_slot.lock() {
+    *slot = Some(child);
+  }
+  loop {
+    if cancel.load(Ordering::Relaxed) {
+      kill_slot(child_slot);
+      return false;
+    }
+    let done = match child_slot.lock().ok().and_then(|mut slot| slot.take()) {
+      Some(mut child) => match child.try_wait() {
+        Ok(Some(_)) => true,
+        Ok(None) => {
+          if let Ok(mut slot) = child_slot.lock() {
+            *slot = Some(child);
+          }
+          false
+        }
+        Err(_) => true,
+      },
+      None => true,
+    };
+    if done {
+      return !cancel.load(Ordering::Relaxed);
+    }
+    thread::sleep(Duration::from_millis(50));
+  }
 }
 
 /// Rendered text of one error-level compiler message (`None` for
@@ -133,16 +219,20 @@ fn error_rendered(line: &str) -> Option<String> {
 /// Resolve the first binary target of the manifest via
 /// `cargo metadata` (no build needed): `<target-dir>/debug/<name>`.
 /// Compares package manifests first, falls back to the first package
-/// with a `bin` target.
-pub fn binary_for_manifest(manifest: &Path) -> Option<PathBuf> {
-  let output = Command::new(cargo_program())
+/// with a `bin` target. `target_dir` overrides the cargo target dir
+/// for the metadata call itself.
+pub fn binary_for_manifest(manifest: &Path, target_dir: Option<&Path>) -> Option<PathBuf> {
+  let mut metadata = Command::new(cargo_program());
+  metadata
     .arg("metadata")
     .arg("--no-deps")
     .arg("--format-version=1")
     .arg("--manifest-path")
-    .arg(manifest)
-    .output()
-    .ok()?;
+    .arg(manifest);
+  if let Some(dir) = target_dir {
+    metadata.env("CARGO_TARGET_DIR", dir);
+  }
+  let output = metadata.output().ok()?;
   if !output.status.success() {
     return None;
   }
@@ -262,10 +352,19 @@ mod tests {
     assert_eq!(error_rendered("not json"), None);
   }
 
+  fn build_request(dir: &PathBuf, clean_first: bool) -> BuildRequest {
+    BuildRequest {
+      root: dir.clone(),
+      clean_first,
+      target_dir: Some(dir.join("target")),
+    }
+  }
+
   #[test]
   fn binary_resolves_without_building() {
     let dir = fixture("meta", "pub fn x() {}\n");
-    let binary = binary_for_manifest(&dir.join("Cargo.toml")).expect("binary");
+    let binary =
+      binary_for_manifest(&dir.join("Cargo.toml"), Some(&dir.join("target"))).expect("binary");
     assert_eq!(binary.file_name().and_then(|n| n.to_str()), Some("xrunmeta"));
     assert!(binary.to_string_lossy().contains("debug"));
     let _ = std::fs::remove_dir_all(&dir);
@@ -276,7 +375,7 @@ mod tests {
     let dir = fixture("ok", "pub fn x() {}\n");
     let (tx, rx) = std::sync::mpsc::channel();
     spawn_build(
-      dir.clone(),
+      build_request(&dir, false),
       Arc::new(AtomicBool::new(false)),
       Arc::new(Mutex::new(None)),
       tx,
@@ -293,7 +392,7 @@ mod tests {
     let dir = fixture("fail", "pub fn x( -> {}\n");
     let (tx, rx) = std::sync::mpsc::channel();
     spawn_build(
-      dir.clone(),
+      build_request(&dir, false),
       Arc::new(AtomicBool::new(false)),
       Arc::new(Mutex::new(None)),
       tx,
@@ -302,6 +401,22 @@ mod tests {
     assert!(!result.success);
     assert!(!result.errors.is_empty());
     assert!(result.binary.is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  #[test]
+  fn build_with_clean_first_succeeds() {
+    let dir = fixture("clean", "pub fn x() {}\n");
+    let (tx, rx) = std::sync::mpsc::channel();
+    spawn_build(
+      build_request(&dir, true),
+      Arc::new(AtomicBool::new(false)),
+      Arc::new(Mutex::new(None)),
+      tx,
+    );
+    let result = rx.recv_timeout(Duration::from_secs(180)).expect("build");
+    assert!(result.success);
+    assert!(result.binary.is_some());
     let _ = std::fs::remove_dir_all(&dir);
   }
 

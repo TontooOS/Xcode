@@ -43,6 +43,7 @@
     "check.indexing": "Dateien werden indexiert...",
     "run.building": "Wird gebaut...",
     "run.running": "Läuft...",
-    "run.no_binary": "Kein ausführbares Ziel zum Starten."
+    "run.no_binary": "Kein ausführbares Ziel zum Starten.",
+    "run.build_ok": "Build erfolgreich."
   }
 }

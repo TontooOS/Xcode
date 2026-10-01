@@ -43,6 +43,7 @@
     "check.indexing": "Indexing Files...",
     "run.building": "Building...",
     "run.running": "Running...",
-    "run.no_binary": "No binary target to run."
+    "run.no_binary": "No binary target to run.",
+    "run.build_ok": "Build succeeded."
   }
 }

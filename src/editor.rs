@@ -31,7 +31,7 @@ use crate::check::{
 use crate::code_editor::{CodeEditor, example_rust_code};
 use crate::debug::{Debugger, SAMPLE_EVERY};
 use crate::run::{
-  STOP_GRACE, BuildJob, BuildResult, RunEvent, force_kill, signal_term, spawn_build,
+  STOP_GRACE, BuildJob, BuildRequest, BuildResult, RunEvent, force_kill, signal_term, spawn_build,
   spawn_line_reader,
 };
 use crate::project_files::{FileEntry, list_project_files, load_file_text};
@@ -356,6 +356,15 @@ enum RunControl {
   Stop,
 }
 
+/// What the Run pill does on the picked device: My Computer builds
+/// and launches, Development builds only, Production cleans first
+/// and builds only. Anything else (e.g. Export) does nothing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RunKind {
+  Full,
+  Build { clean: bool },
+}
+
 /// App run phase for the pills and the status pill.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum RunPhase {
@@ -405,6 +414,8 @@ pub struct EditorUi {
   run_request: Rc<Cell<Option<RunControl>>>,
   /// Running `cargo build` job, if any.
   build_job: Option<BuildJob>,
+  /// Launch the app once the running build succeeds.
+  build_launch: bool,
   /// Launched app with debugger and output channel, if any.
   active_run: Option<ActiveRun>,
   /// Centered device text-menu with sections (example selection only).
@@ -723,6 +734,7 @@ impl EditorUi {
         .on_action(move |_| stop_press.set(Some(RunControl::Stop))),
       run_request,
       build_job: None,
+      build_launch: false,
       active_run: None,
       computer: FileImage::new(computer_icon_path(), DEVICE_ICON, DEVICE_ICON).radius(5.0),
       device: NestedMenu::new(
@@ -1080,15 +1092,20 @@ impl EditorUi {
     }
   }
 
-  /// Run targets My Computer only (unset or first menu row): every
-  /// other device option keeps both pills disabled.
-  fn device_is_my_computer(&self) -> bool {
-    matches!(self.device_sel.get(), None | Some(1))
+  /// What the Run pill does on the picked device, if anything.
+  fn run_kind(&self) -> Option<RunKind> {
+    match self.device_sel.get() {
+      None | Some(1) => Some(RunKind::Full),
+      Some(4) => Some(RunKind::Build { clean: true }),
+      Some(5) => Some(RunKind::Build { clean: false }),
+      _ => None,
+    }
   }
 
-  /// Run controls work on real cargo projects with My Computer only.
+  /// Run controls work on real cargo projects with a runnable device
+  /// (My Computer plus both Build options; Export stays dead).
   fn run_controls_enabled(&self) -> bool {
-    self.device_is_my_computer()
+    self.run_kind().is_some()
       && self
         .project_root
         .as_ref()
@@ -1100,14 +1117,22 @@ impl EditorUi {
     self.each_page(|ed| ed.push_log_line(line));
   }
 
-  /// Launch `cargo run`: flush, open the bottom panel fresh and start
-  /// the background build. Only from Idle with My Computer.
+  /// Launch from the Run pill: My Computer builds and launches,
+  /// Development builds only, Production cleans first and builds
+  /// only. Only from Idle with a runnable device.
   pub fn press_run(&mut self) {
     if !self.run_controls_enabled() || !matches!(self.run_phase(), RunPhase::Idle) {
       return;
     }
+    let Some(kind) = self.run_kind() else {
+      return;
+    };
     let Some(root) = self.project_root.clone() else {
       return;
+    };
+    let (launch, clean) = match kind {
+      RunKind::Full => (true, false),
+      RunKind::Build { clean } => (false, clean),
     };
     self.each_page(|ed| ed.clear_run_data());
     self.panel_open.set(true);
@@ -1116,16 +1141,20 @@ impl EditorUi {
     let cancel = Arc::new(AtomicBool::new(false));
     let child = Arc::new(Mutex::new(None));
     let (tx, rx) = std::sync::mpsc::channel();
-    spawn_build(root, cancel.clone(), child.clone(), tx);
+    spawn_build(
+      BuildRequest { root, clean_first: clean, target_dir: None },
+      cancel.clone(),
+      child.clone(),
+      tx,
+    );
+    self.build_launch = launch;
     self.build_job = Some(BuildJob { rx, cancel, child });
   }
 
   /// Stop the app: cancel a running build, `SIGTERM` a running app
-  /// (force-kill on the second press), nothing while idle.
+  /// (force-kill on the second press), nothing while idle. Works
+  /// whenever something runs, whatever the device shows.
   pub fn press_stop(&mut self) {
-    if !self.run_controls_enabled() {
-      return;
-    }
     if let Some(job) = self.build_job.take() {
       job.cancel.store(true, Ordering::Relaxed);
       if let Ok(mut slot) = job.child.lock() {
@@ -1231,10 +1260,13 @@ impl EditorUi {
     }
     if let Some(result) = built {
       self.build_job = None;
+      let launch = self.build_launch;
+      self.build_launch = false;
       if result.success {
-        match result.binary {
-          Some(binary) => self.launch_binary(binary),
-          None => self.push_run_log(&lang::t("run.no_binary")),
+        match (launch, result.binary) {
+          (true, Some(binary)) => self.launch_binary(binary),
+          (true, None) => self.push_run_log(&lang::t("run.no_binary")),
+          (false, _) => self.push_run_log(&lang::t("run.build_ok")),
         }
       } else {
         for rendered in &result.errors {
@@ -1545,10 +1577,12 @@ impl EditorUi {
     );
     self.stop_pill.set_theme(theme.mode, theme.glass);
     self.stop_pill.set_focused(focused);
-    self.stop_pill.set_disabled(
-      !(self.run_controls_enabled()
-        && matches!(self.run_phase(), RunPhase::Building | RunPhase::Running | RunPhase::Stopping)),
-    );
+    // Stop stays available whenever something runs, whatever the
+    // device shows, so a runaway build or app is always stoppable.
+    self.stop_pill.set_disabled(!matches!(
+      self.run_phase(),
+      RunPhase::Building | RunPhase::Running | RunPhase::Stopping
+    ));
     self.computer.set_theme(dark);
     self.computer.set_focused(focused);
     self.device.set_theme(palette.accent, dark);
@@ -2521,7 +2555,12 @@ mod tests {
     assert!(ui.run_controls_enabled());
     ui.device_sel.set(Some(1));
     assert!(ui.run_controls_enabled());
-    for other in [0usize, 2, 3, 4, 5, 6, 7, 8] {
+    // Both Build options run, everything else (incl. Export) stays dead.
+    for device in [4usize, 5] {
+      ui.device_sel.set(Some(device));
+      assert!(ui.run_controls_enabled(), "device {device}");
+    }
+    for other in [0usize, 2, 3, 6, 7, 8] {
       ui.device_sel.set(Some(other));
       assert!(!ui.run_controls_enabled(), "device {other}");
     }
@@ -2529,9 +2568,24 @@ mod tests {
   }
 
   #[test]
+  fn run_kind_maps_devices() {
+    let code = example_code("testApp", "test", "arlo");
+    let mut ui = EditorUi::new("test", code);
+    assert_eq!(ui.run_kind(), Some(RunKind::Full));
+    ui.device_sel.set(Some(1));
+    assert_eq!(ui.run_kind(), Some(RunKind::Full));
+    ui.device_sel.set(Some(5));
+    assert_eq!(ui.run_kind(), Some(RunKind::Build { clean: false }));
+    ui.device_sel.set(Some(4));
+    assert_eq!(ui.run_kind(), Some(RunKind::Build { clean: true }));
+    ui.device_sel.set(Some(8));
+    assert_eq!(ui.run_kind(), None);
+  }
+
+  #[test]
   fn press_run_ignores_wrong_device_or_busy() {
     let (mut ui, parent, _root) = scaffold_ui("guard");
-    ui.device_sel.set(Some(4));
+    ui.device_sel.set(Some(8));
     ui.press_run();
     assert!(ui.build_job.is_none());
     ui.device_sel.set(None);
@@ -2577,6 +2631,58 @@ mod tests {
   }
 
   #[test]
+  fn build_only_success_logs_confirmation() {
+    use crate::run::BuildResult;
+    let (mut ui, parent, _root) = scaffold_ui("buildonly");
+    let (tx, rx) = std::sync::mpsc::channel();
+    ui.build_job = Some(BuildJob {
+      rx,
+      cancel: Arc::new(AtomicBool::new(false)),
+      child: Arc::new(Mutex::new(None)),
+    });
+    ui.build_launch = false;
+    tx.send(BuildResult { success: true, errors: Vec::new(), binary: None }).expect("send");
+    ui.poll_run();
+    assert!(ui.build_job.is_none());
+    assert!(ui.active_run.is_none());
+    assert_eq!(ui.run_phase(), RunPhase::Idle);
+    let page = ui.sidebar.page_mut(ui.sidebar.selected_index()).expect("page");
+    let ed = page
+      .as_any_mut()
+      .downcast_mut::<CodeEditor>()
+      .expect("code page");
+    assert!(ed.log_lines().iter().any(|line| line.contains("Build")));
+    let _ = std::fs::remove_dir_all(&parent);
+  }
+
+  #[test]
+  fn build_success_with_binary_launches() {
+    use crate::run::BuildResult;
+    let (mut ui, parent, _root) = scaffold_ui("launch");
+    let (tx, rx) = std::sync::mpsc::channel();
+    ui.build_job = Some(BuildJob {
+      rx,
+      cancel: Arc::new(AtomicBool::new(false)),
+      child: Arc::new(Mutex::new(None)),
+    });
+    ui.build_launch = true;
+    tx.send(BuildResult {
+      success: true,
+      errors: Vec::new(),
+      binary: Some(std::path::PathBuf::from("/bin/true")),
+    })
+    .expect("send");
+    ui.poll_run();
+    assert!(ui.build_job.is_none());
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    ui.poll_run();
+    ui.poll_run();
+    assert!(ui.active_run.is_none());
+    assert_eq!(ui.run_phase(), RunPhase::Idle);
+    let _ = std::fs::remove_dir_all(&parent);
+  }
+
+  #[test]
   fn build_success_without_binary_logs_note() {
     use crate::run::BuildResult;
     let (mut ui, parent, _root) = scaffold_ui("nobin");
@@ -2586,6 +2692,7 @@ mod tests {
       cancel: Arc::new(AtomicBool::new(false)),
       child: Arc::new(Mutex::new(None)),
     });
+    ui.build_launch = true;
     tx.send(BuildResult { success: true, errors: Vec::new(), binary: None }).expect("send");
     ui.poll_run();
     assert!(ui.active_run.is_none());

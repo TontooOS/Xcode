@@ -188,7 +188,12 @@ next to `XCODE_PROJECT_NAME`).
   disables both pills, like a missing manifest); `press_run`
   flushes, clears and opens the bottom panel, then spawns one
   `cargo build` worker (`spawn_build`, build logs hidden,
-  `run.building` status). On success the built binary resolves via
+  `run.building` status). What runs depends on the device
+  (`run_kind`): My Computer builds and launches (`RunKind::Full`),
+  Development builds only and Production cleans first and builds
+  only (`RunKind::Build`, clean via `cargo clean`); anything else
+  (e.g. Export) does nothing. Build-only success pushes the
+  localized `run.build_ok` line. On success the built binary resolves via
   `cargo metadata` (`binary_for_manifest`) and launches directly
   with piped output streaming line by line into every page's Logs
   (`spawn_line_reader`, live tail) plus a `run.running` status; the
@@ -197,7 +202,8 @@ next to `XCODE_PROJECT_NAME`).
   and network stay empty, no per-process counters exist). Build
   failures push the rendered compiler errors into Logs.
   `press_stop` cancels builds, sends `SIGTERM` to the app and
-  force-kills after 5s (`STOP_GRACE`, second press kills at once);
+  force-kills after 5s (`STOP_GRACE`, second press kills at once,
+  Stop stays available whenever something runs);
   window close kills everything (`kill_run_now`). Nothing else is
   ever built or run.
 - After `Create`, the new project hands over immediately (plus joining
