@@ -319,6 +319,10 @@ pub const PANEL_STATS_SPLIT: f32 = 0.6;
 /// Drag distance in logical px before a divider press becomes a
 /// resize instead of a collapse toggle.
 pub const PANEL_DRAG_SLOP: f32 = 4.0;
+/// Run log lines kept per page.
+pub const LOGS_CAP: usize = 500;
+/// Performance samples kept per metric (60s at one sample per second).
+pub const SAMPLES_CAP: usize = 60;
 /// Log text size in logical px.
 pub const LOG_FONT_SIZE: f32 = 12.0;
 /// Log row height in logical px.
@@ -387,13 +391,13 @@ pub struct CodeEditor {
   divider_moved: bool,
   /// Divider strip hovered (accent highlight plus resize cursor).
   divider_hover: bool,
-  /// Metric values (always empty, nothing is generated).
+  /// Metric values (debugger samples while the app runs, else empty).
   samples_cpu: Vec<f32>,
   samples_gpu: Vec<f32>,
   samples_ram: Vec<f32>,
   samples_disk: Vec<f32>,
   samples_net: Vec<f32>,
-  /// Log lines (always empty, nothing is generated).
+  /// App log lines while the app runs (else empty).
   logs: Vec<String>,
   /// Logs overlay bar plus model guard.
   log_bar: Scrollbar,
@@ -532,6 +536,53 @@ impl CodeEditor {
       Some(at) if at.elapsed() >= AUTOSAVE_DELAY => self.save_now(),
       _ => false,
     }
+  }
+
+  /// Append one app log line and stick to the bottom (live tail).
+  pub fn push_log_line(&mut self, line: &str) {
+    let clean: String = line
+      .chars()
+      .filter(|c| !c.is_control() || *c == '\t')
+      .collect();
+    let clean = clean.trim_end_matches('\r').to_string();
+    self.logs.push(clean);
+    if self.logs.len() > LOGS_CAP {
+      let drop = self.logs.len() - LOGS_CAP;
+      self.logs.drain(..drop);
+    }
+    let list_h = (self.zones().4.3 - PANEL_HEADER_H).max(0.0);
+    if list_h > 0.0 {
+      let max = (self.logs.len() as f32 * LOG_LINE_H - list_h).max(0.0);
+      self.log_bar.set_offset(max);
+    }
+  }
+
+  /// Append one debugger sample per metric (GPU and network stay at
+  /// zero: no per-process counters exist for them).
+  pub fn push_perf_sample(&mut self, cpu_pct: f32, ram_mb: f32, disk_mbps: f32) {
+    Self::push_capped(&mut self.samples_cpu, cpu_pct);
+    Self::push_capped(&mut self.samples_gpu, 0.0);
+    Self::push_capped(&mut self.samples_ram, ram_mb);
+    Self::push_capped(&mut self.samples_disk, disk_mbps);
+    Self::push_capped(&mut self.samples_net, 0.0);
+  }
+
+  fn push_capped(series: &mut Vec<f32>, value: f32) {
+    series.push(value);
+    if series.len() > SAMPLES_CAP {
+      series.remove(0);
+    }
+  }
+
+  /// Drop all run data (fresh panel on every launch).
+  pub fn clear_run_data(&mut self) {
+    self.samples_cpu.clear();
+    self.samples_gpu.clear();
+    self.samples_ram.clear();
+    self.samples_disk.clear();
+    self.samples_net.clear();
+    self.logs.clear();
+    self.log_bar.set_offset(0.0);
   }
 
   pub fn wants_text_cursor(&self) -> bool {
@@ -1232,10 +1283,9 @@ impl CodeEditor {
     }
   }
 
-  /// RAM label in MB for a 16 GB machine (0..100 maps to the full
-  /// range), instead of a bare percent.
-  fn ram_text(value: f32) -> String {
-    format!("RAM {:.0} MB", value * 163.84)
+  /// RAM label in MB for a real debugger sample.
+  fn ram_text(mb: f32) -> String {
+    format!("RAM {:.0} MB", mb.max(0.0))
   }
 
   /// Frame clock hook: generates nothing. Performance samples and
@@ -1279,9 +1329,9 @@ impl CodeEditor {
 
   /// Left panel stats: `Performance` header plus a divider-free 2x2
   /// grid (CPU top left, GPU top right, RAM bottom left, bottom right
-  /// split into Disk and Network). No samples are generated, so every
-  /// cell keeps its label and shows the localized `panel.no_metrics`
-  /// text where the graph would sit.
+  /// split into Disk and Network). Every cell keeps its label with
+  /// the live debugger value below; without samples the localized
+  /// `panel.no_metrics` text shows instead (no graphs anywhere).
   fn draw_stats(
     &self,
     scene: &mut Scene,
@@ -1311,66 +1361,62 @@ impl CodeEditor {
     let sub_w = ((col_w - gap) / 2.0).max(0.0);
     let x0 = stats.0 + pad;
     let x1 = x0 + col_w + gap;
+    let live = !self.samples_cpu.is_empty();
     let cpu = self.samples_cpu.last().copied().unwrap_or(0.0);
-    let gpu = self.samples_gpu.last().copied().unwrap_or(0.0);
     let ram = self.samples_ram.last().copied().unwrap_or(0.0);
     let disk = self.samples_disk.last().copied().unwrap_or(0.0);
-    let net = self.samples_net.last().copied().unwrap_or(0.0);
+    let empty = lang::t("panel.no_metrics");
     let cells = [
-      (x0, top, col_w, row_h, format!("CPU {:.0}%", cpu)),
-      (x1, top, col_w, row_h, format!("GPU {:.0}%", gpu)),
-      (x0, top + row_h, col_w, row_h, Self::ram_text(ram)),
+      (x0, top, col_w, row_h, "CPU", if live { format!("{cpu:.0}%") } else { empty.clone() }),
+      (x1, top, col_w, row_h, "GPU", if live { "—".to_string() } else { empty.clone() }),
+      (x0, top + row_h, col_w, row_h, "RAM", if live { Self::ram_text(ram) } else { empty.clone() }),
       (
         x1,
         top + row_h,
         sub_w,
         row_h,
-        format!("Disk {:.0} MB/s", disk * 3.2),
+        "Disk",
+        if live { format!("{disk:.1} MB/s") } else { empty.clone() },
       ),
       (
         x1 + sub_w + gap,
         top + row_h,
         sub_w,
         row_h,
-        format!("Network {:.0} Mb/s", net * 1.8),
+        "Network",
+        if live { "—".to_string() } else { empty },
       ),
     ];
-    for (cx, cy, cw, ch, label) in cells {
-      Self::draw_metric_empty(scene, fonts, dim, cx, cy, cw, ch, &label);
+    for (cx, cy, cw, ch, label, value) in cells {
+      Self::draw_metric_cell(scene, fonts, dim, self.ink(), cx, cy, cw, ch, label, &value);
     }
   }
 
-  /// One stats cell: dim label on top, localized `panel.no_metrics`
-  /// placeholder below instead of a sparkline graph.
-  /// Cells are spaced, never divided by rules.
-  fn draw_metric_empty(
+  /// One stats cell: dim label on top, live value (or the
+  /// `panel.no_metrics` placeholder) below. Cells are spaced, never
+  /// divided by rules.
+  fn draw_metric_cell(
     scene: &mut Scene,
     fonts: &mut FontSystem,
     dim: Color,
+    ink: Color,
     x: f32,
     y: f32,
     w: f32,
     h: f32,
     label: &str,
+    value: &str,
   ) {
     if w <= 0.0 || h <= 0.0 {
       return;
     }
     Self::draw_label(scene, fonts, label, PANEL_LABEL_SIZE, dim, x, y + 2.0);
-    let gy = y + 16.0;
-    let gh = (h - 18.0).max(0.0);
-    if gh <= 0.0 {
+    let vy = y + 16.0;
+    let vh = (h - 18.0).max(0.0);
+    if vh <= 0.0 {
       return;
     }
-    Self::draw_label(
-      scene,
-      fonts,
-      &lang::t("panel.no_metrics"),
-      PANEL_LABEL_SIZE,
-      dim,
-      x,
-      gy,
-    );
+    Self::draw_label(scene, fonts, value, PANEL_LABEL_SIZE, ink, x, vy);
   }
 
   /// Right panel logs: `Logs` header plus the localized
@@ -1942,8 +1988,34 @@ mod tests {
 
   #[test]
   fn ram_label_shows_megabytes() {
-    assert_eq!(CodeEditor::ram_text(50.0), "RAM 8192 MB");
+    assert_eq!(CodeEditor::ram_text(8192.0), "RAM 8192 MB");
     assert!(CodeEditor::ram_text(0.0).ends_with("MB"));
+  }
+
+  #[test]
+  fn run_logs_cap_and_clear() {
+    let mut ed = CodeEditor::new("hi".to_string());
+    ed.rect = (0.0, 0.0, 400.0, 600.0);
+    for i in 0..(LOGS_CAP + 50) {
+      ed.push_log_line(&format!("line {i}"));
+    }
+    assert_eq!(ed.log_lines().len(), LOGS_CAP);
+    assert!(ed.log_lines().last().unwrap().contains("line"));
+    ed.clear_run_data();
+    assert!(ed.log_lines().is_empty());
+    assert_eq!(ed.sample_count(), 0);
+  }
+
+  #[test]
+  fn perf_samples_cap_and_clear() {
+    let mut ed = CodeEditor::new("hi".to_string());
+    for _ in 0..(SAMPLES_CAP + 10) {
+      ed.push_perf_sample(12.0, 128.0, 3.5);
+    }
+    assert_eq!(ed.sample_count(), SAMPLES_CAP);
+    assert_eq!(ed.samples_ram.len(), SAMPLES_CAP);
+    ed.clear_run_data();
+    assert_eq!(ed.sample_count(), 0);
   }
 
   #[test]

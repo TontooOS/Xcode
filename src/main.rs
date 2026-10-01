@@ -19,11 +19,13 @@
 
 mod code_editor;
 mod check;
+mod debug;
 mod editor;
 mod icon;
 mod lang;
 mod project_files;
 mod projects;
+mod run;
 mod scaffold;
 mod sheet;
 

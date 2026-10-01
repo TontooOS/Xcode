@@ -48,7 +48,7 @@ pages: narrow windows squeeze the code, wide windows use everything.
 | Area | Element | Description |
 |---|---|---|
 | `bar` | `Sidebar` traffic | All three traffic lights working via `press()`; drags via `drag_rect()` |
-| `pills` | `BasicToolbar` | Single dead Run/Stop pair (`play.fill`, divider, `stop.fill`) at the sidebar top right edge, centered on the traffic row: hover/press tint only, nothing fires; content title via `set_title` (`{project} › My Mac`, `ed.device`) |
+| `pills` | `BasicToolbar` | Two round pills at the sidebar top right edge, centered on the traffic row: Run (`play.fill`) launches `cargo run` on My Computer (build first with a `Building...` status pill and hidden build logs, then the real app with live Logs plus a `Running...` pill and debugger stats; compiler errors land in Logs on failure), Stop (`stop.fill`) closes the app (`SIGTERM`, force-kill after 5s, instant on second press); each greys out via `set_disabled` when unavailable, and any other device option greys out both; content title via `set_title` (`{project} › My Mac`, `ed.device`) |
 | `topbar` | `FileImage` + `BasicToolbar` + `NestedMenu` + pills | 22px `Resources/computer.png` glyph left of the `My Computer` text-menu at 15px (`button_font`, `menu.*` keys, sections Devices/Build/Utilities with `computer.png`/`wrench.png`/`up.png` row icons via the new `MenuItem::icon` API); the picked row reflects on top (button label plus glyph, display only) on a 36px glass pill: the pill centers on the content middle right of the sidebar and wraps a compact group (glyph plus gap plus button text plus gap plus chevron) with equal padding, so icon, text and chevron sit centered inside; the button width derives from the button text only (not the widest dropdown row) and the menu stays vertically centered in the pill; two round chevron pills (`chevron.left`, `chevron.right`) at the content left stepping through the visit history (greyed out at the history ends via `set_disabled`); notes placeholder pill (`chart.line.uptrend.xyaxis`, round 36px circle) at the content right (hover and press tint only, toggles the bottom panel open or closed); no content title, no collapse button; `HorizontalDivider` between pills and editor; all example only |
 | `navigator` | `Sidebar` + `BarSwitcher` + outline tree + warnings overlay | Project files below the tabs (see `open`) as a nested `BasicOutlineGroup` tree: folders nest recursively with trailing `>` chevrons, type icons plus tints and slide plus fade animation, open state remembered per folder; clicks select the flat page (folders toggle too), the flat `Sidebar` rows stay underneath for the pages; a `BarSwitcher` tab switcher with icon plus label cells (`folder` `Files` default, warning triangle `Warnings & Errors`) sits in the gap above the tree; the warnings tab covers the tree with an example list (3 yellow warnings plus 2 red errors with tinted icons, file and line subtitles) while the content keeps showing the selected file; clicking a warning expands its ancestors, selects its file and moves the caret to its line while staying on the tab (only the editor content moves); `collapsible(false)` (never collapses, no collapse button), search hidden (`search_field(false)`), toggle pill hidden; mouse reaches the element natively (hover, selection, wheel, resize cursor); `set_item_text(None)` clears the element's white default so labels follow the theme (light `#272727`) |
 | `search` | `SearchField` | Live capsule (`ed.search`) pinned to the sidebar bottom: 28px tall, full column width even while resizing; typing filters live: on the Files tab every content hit across files covers the tree (plain `doc.fill` icon plus `file:line` title plus the matched code snippet, capped at 200 rows, read-only pages skipped, `search.no_results` placeholder while empty), on the Warnings tab only matching issues stay; click or Enter jumps to the hit (file select plus caret to line and column), ESC clears the query; search typing never arms the background check |
@@ -183,6 +183,23 @@ next to `XCODE_PROJECT_NAME`).
   requests via `nav_request` polled in `draw`, tree synced without
   touching history) and grey out at the history ends
   (`can_go_back`, `can_go_forward`, `set_disabled`).
+- App run (`src/run.rs` plus `src/debug.rs`, no new dependencies):
+  the Run pill works on My Computer only (any other device option
+  disables both pills, like a missing manifest); `press_run`
+  flushes, clears and opens the bottom panel, then spawns one
+  `cargo build` worker (`spawn_build`, build logs hidden,
+  `run.building` status). On success the built binary resolves via
+  `cargo metadata` (`binary_for_manifest`) and launches directly
+  with piped output streaming line by line into every page's Logs
+  (`spawn_line_reader`, live tail) plus a `run.running` status; the
+  `Debugger` attaches to the pid and samples CPU, RAM and disk from
+  `/proc` every second (`SAMPLE_EVERY`) into the stats cells (GPU
+  and network stay empty, no per-process counters exist). Build
+  failures push the rendered compiler errors into Logs.
+  `press_stop` cancels builds, sends `SIGTERM` to the app and
+  force-kills after 5s (`STOP_GRACE`, second press kills at once);
+  window close kills everything (`kill_run_now`). Nothing else is
+  ever built or run.
 - After `Create`, the new project hands over immediately (plus joining
   the list).
 

@@ -40,6 +40,9 @@
     "issue.missing_docs": "Doku für `tick` fehlt",
     "panel.no_logs": "Keine Logs",
     "panel.no_metrics": "Keine Leistungsmetriken",
-    "check.indexing": "Dateien werden indexiert..."
+    "check.indexing": "Dateien werden indexiert...",
+    "run.building": "Wird gebaut...",
+    "run.running": "Läuft...",
+    "run.no_binary": "Kein ausführbares Ziel zum Starten."
   }
 }

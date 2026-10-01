@@ -16,7 +16,7 @@
 //! closes, short gap), then opens the 1100x700 editor fresh.
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
-use std::process::Child;
+use std::process::{Child, Command, Stdio};
 use std::rc::Rc;
 use std::sync::{
   Arc, Mutex,
@@ -29,6 +29,11 @@ use crate::check::{
   CHECK_IDLE_DELAY, CheckResult, diagnostic_title, spawn_check,
 };
 use crate::code_editor::{CodeEditor, example_rust_code};
+use crate::debug::{Debugger, SAMPLE_EVERY};
+use crate::run::{
+  STOP_GRACE, BuildJob, BuildResult, RunEvent, force_kill, signal_term, spawn_build,
+  spawn_line_reader,
+};
 use crate::project_files::{FileEntry, list_project_files, load_file_text};
 use crate::TontooUI::elements::{
   Align, BasicOutlineGroup, BasicText, BasicToolbar, BarSwitcher,
@@ -344,6 +349,33 @@ enum NavDir {
   Fwd,
 }
 
+/// Run pill request (Run launches, Stop closes).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RunControl {
+  Run,
+  Stop,
+}
+
+/// App run phase for the pills and the status pill.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RunPhase {
+  Idle,
+  Building,
+  Running,
+  Stopping,
+}
+
+/// One launched app: UI-owned child for stop/kill plus the attached
+/// debugger and the output channel.
+struct ActiveRun {
+  child: Child,
+  debugger: Debugger,
+  rx: Receiver<RunEvent>,
+  /// `SIGTERM` sent at this time (`None` while happily running).
+  stop_sent_at: Option<Instant>,
+  last_sample: Instant,
+}
+
 /// Max content search hits (the results list stays usable).
 pub const MAX_SEARCH_HITS: usize = 200;
 /// Max chars of the matched code line shown per search row.
@@ -364,9 +396,17 @@ pub struct EditorUi {
   search: SearchField,
   /// Divider between the topbar pills and the editor below.
   top_div: HorizontalDivider,
-  /// Dead Run/Stop pair at the sidebar top right edge (hover/press
-  /// tint only, no callbacks).
-  run_stop: BasicToolbar,
+  /// Run/Stop pills at the sidebar top right edge: Run launches
+  /// `cargo run` on My Computer, Stop closes the app (greyed out
+  /// when unavailable, like the chevrons).
+  run_pill: BasicToolbar,
+  stop_pill: BasicToolbar,
+  /// Pending Run/Stop request from the pills.
+  run_request: Rc<Cell<Option<RunControl>>>,
+  /// Running `cargo build` job, if any.
+  build_job: Option<BuildJob>,
+  /// Launched app with debugger and output channel, if any.
+  active_run: Option<ActiveRun>,
   /// Centered device text-menu with sections (example selection only).
   /// Transparent body over a longer empty glass pill below. Reflects
   /// the last picked row (label plus icon, display only).
@@ -667,15 +707,23 @@ impl EditorUi {
         .on_action(move |_| panel_toggle.set(!panel_toggle.get()));
     // History navigation requests from the chevron pills.
     let nav_request = Rc::new(Cell::new(None));
+    // Run/Stop pill requests (applied in `draw`).
+    let run_request = Rc::new(Cell::new(None));
+    let run_press = run_request.clone();
+    let stop_press = run_request.clone();
     Self {
       sidebar,
       search: SearchField::new(lang::t("ed.search")),
       top_div: HorizontalDivider::new(),
-      run_stop: BasicToolbar::from_items(vec![
-        ToolbarItem::icon("play.fill"),
-        ToolbarItem::divider(),
-        ToolbarItem::icon("stop.fill"),
-      ]),
+      run_pill: BasicToolbar::from_items(vec![ToolbarItem::icon("play.fill")])
+        .round(true)
+        .on_action(move |_| run_press.set(Some(RunControl::Run))),
+      stop_pill: BasicToolbar::from_items(vec![ToolbarItem::icon("stop.fill")])
+        .round(true)
+        .on_action(move |_| stop_press.set(Some(RunControl::Stop))),
+      run_request,
+      build_job: None,
+      active_run: None,
       computer: FileImage::new(computer_icon_path(), DEVICE_ICON, DEVICE_ICON).radius(5.0),
       device: NestedMenu::new(
         lang::t("menu.device"),
@@ -1015,6 +1063,246 @@ impl EditorUi {
     }
   }
 
+  /// Current app run phase for pills and the status pill.
+  fn run_phase(&self) -> RunPhase {
+    if self
+      .active_run
+      .as_ref()
+      .is_some_and(|run| run.stop_sent_at.is_some())
+    {
+      RunPhase::Stopping
+    } else if self.active_run.is_some() {
+      RunPhase::Running
+    } else if self.build_job.is_some() {
+      RunPhase::Building
+    } else {
+      RunPhase::Idle
+    }
+  }
+
+  /// Run targets My Computer only (unset or first menu row): every
+  /// other device option keeps both pills disabled.
+  fn device_is_my_computer(&self) -> bool {
+    matches!(self.device_sel.get(), None | Some(1))
+  }
+
+  /// Run controls work on real cargo projects with My Computer only.
+  fn run_controls_enabled(&self) -> bool {
+    self.device_is_my_computer()
+      && self
+        .project_root
+        .as_ref()
+        .is_some_and(|root| root.join("Cargo.toml").is_file())
+  }
+
+  /// Push one app log line to every page (live tail on all of them).
+  fn push_run_log(&mut self, line: &str) {
+    self.each_page(|ed| ed.push_log_line(line));
+  }
+
+  /// Launch `cargo run`: flush, open the bottom panel fresh and start
+  /// the background build. Only from Idle with My Computer.
+  pub fn press_run(&mut self) {
+    if !self.run_controls_enabled() || !matches!(self.run_phase(), RunPhase::Idle) {
+      return;
+    }
+    let Some(root) = self.project_root.clone() else {
+      return;
+    };
+    self.each_page(|ed| ed.clear_run_data());
+    self.panel_open.set(true);
+    self.last_panel_open.set(true);
+    self.apply_panel_open(true);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let child = Arc::new(Mutex::new(None));
+    let (tx, rx) = std::sync::mpsc::channel();
+    spawn_build(root, cancel.clone(), child.clone(), tx);
+    self.build_job = Some(BuildJob { rx, cancel, child });
+  }
+
+  /// Stop the app: cancel a running build, `SIGTERM` a running app
+  /// (force-kill on the second press), nothing while idle.
+  pub fn press_stop(&mut self) {
+    if !self.run_controls_enabled() {
+      return;
+    }
+    if let Some(job) = self.build_job.take() {
+      job.cancel.store(true, Ordering::Relaxed);
+      if let Ok(mut slot) = job.child.lock() {
+        if let Some(mut child) = slot.take() {
+          let _ = child.kill();
+          let _ = child.wait();
+        }
+      }
+      return;
+    }
+    let Some(run) = self.active_run.as_mut() else {
+      return;
+    };
+    let pid = run.child.id();
+    if run.stop_sent_at.is_some() {
+      force_kill(pid);
+      return;
+    }
+    if !signal_term(pid) {
+      force_kill(pid);
+      return;
+    }
+    run.stop_sent_at = Some(Instant::now());
+  }
+
+  /// Apply a pending Run/Stop pill request, if any.
+  fn poll_run_request(&mut self) {
+    if let Some(control) = self.run_request.take() {
+      match control {
+        RunControl::Run => self.press_run(),
+        RunControl::Stop => self.press_stop(),
+      }
+    }
+  }
+
+  /// Launch a built binary directly: piped output streams into the
+  /// Logs panel, the debugger attaches for live stats.
+  fn launch_binary(&mut self, binary: PathBuf) {
+    let Some(root) = self.project_root.clone() else {
+      return;
+    };
+    let mut child = match Command::new(&binary)
+      .current_dir(&root)
+      .stdin(Stdio::null())
+      .stdout(Stdio::piped())
+      .stderr(Stdio::piped())
+      .spawn()
+    {
+      Ok(child) => child,
+      Err(err) => {
+        self.push_run_log(&format!("cannot start {}: {err}", binary.display()));
+        return;
+      }
+    };
+    let pid = child.id();
+    let (tx, rx) = std::sync::mpsc::channel();
+    if let Some(out) = child.stdout.take() {
+      spawn_line_reader(out, tx.clone());
+    }
+    if let Some(err) = child.stderr.take() {
+      spawn_line_reader(err, tx.clone());
+    }
+    eprintln!("[xcode-run] started pid={pid}");
+    self.active_run = Some(ActiveRun {
+      child,
+      debugger: Debugger::attach(pid),
+      rx,
+      stop_sent_at: None,
+      last_sample: Instant::now(),
+    });
+  }
+
+  /// Kill any running build or app immediately (window close path).
+  fn kill_run_now(&mut self) {
+    if let Some(job) = self.build_job.take() {
+      job.cancel.store(true, Ordering::Relaxed);
+      if let Ok(mut slot) = job.child.lock() {
+        if let Some(mut child) = slot.take() {
+          let _ = child.kill();
+          let _ = child.wait();
+        }
+      }
+    }
+    if let Some(mut run) = self.active_run.take() {
+      let pid = run.child.id();
+      force_kill(pid);
+      let _ = run.child.wait();
+    }
+  }
+
+  /// Run pipeline pump, called every frame: reaps finished builds
+  /// (launch or show errors), drains app output into the Logs panel,
+  /// reaps exits, escalates stops after 5s and samples the debugger.
+  fn poll_run(&mut self) {
+    let mut built: Option<BuildResult> = None;
+    let mut build_gone = false;
+    if let Some(job) = &self.build_job {
+      match job.rx.try_recv() {
+        Ok(result) => built = Some(result),
+        Err(TryRecvError::Empty) => {}
+        Err(TryRecvError::Disconnected) => build_gone = true,
+      }
+    }
+    if let Some(result) = built {
+      self.build_job = None;
+      if result.success {
+        match result.binary {
+          Some(binary) => self.launch_binary(binary),
+          None => self.push_run_log(&lang::t("run.no_binary")),
+        }
+      } else {
+        for rendered in &result.errors {
+          for line in rendered.lines() {
+            self.push_run_log(line);
+          }
+        }
+      }
+    } else if build_gone {
+      self.build_job = None;
+    }
+    // Drain app output (bounded per frame, the rest follows).
+    if self.active_run.is_some() {
+      for _ in 0..500 {
+        let line = match self.active_run.as_ref() {
+          Some(run) => match run.rx.try_recv() {
+            Ok(crate::run::RunEvent::Line(line)) => Some(line),
+            _ => None,
+          },
+          None => None,
+        };
+        match line {
+          Some(line) => self.push_run_log(&line),
+          None => break,
+        }
+      }
+    }
+    // Reap exits (natural or after stop).
+    if let Some(run) = self.active_run.as_mut() {
+      match run.child.try_wait() {
+        Ok(Some(status)) => {
+          eprintln!("[xcode-run] exited status={status}");
+          self.active_run = None;
+          return;
+        }
+        Ok(None) => {}
+        Err(_) => {
+          self.active_run = None;
+          return;
+        }
+      }
+    }
+    // Escalate stops after the grace period.
+    if let Some(run) = self.active_run.as_mut() {
+      if let Some(sent) = run.stop_sent_at {
+        if sent.elapsed() >= STOP_GRACE {
+          let pid = run.child.id();
+          force_kill(pid);
+          run.stop_sent_at = Some(Instant::now());
+        }
+      }
+    }
+    // Debugger samples while happily running.
+    if let Some(run) = self.active_run.as_mut() {
+      if run.stop_sent_at.is_none()
+        && run.last_sample.elapsed() >= SAMPLE_EVERY
+        && run.debugger.alive()
+      {
+        run.last_sample = Instant::now();
+        if let Some(sample) = run.debugger.sample() {
+          self.each_page(|ed| {
+            ed.push_perf_sample(sample.cpu_pct, sample.mem_mb, sample.disk_mbps);
+          });
+        }
+      }
+    }
+  }
+
   /// Jump to an issue: select its file and move the caret to its
   /// line. Stays on the current tab (only the editor content moves).
   /// Runs at once on press so the content never flashes the wrong file.
@@ -1237,6 +1525,9 @@ impl EditorUi {
     // Background check scheduling (reap, cancel on new keystrokes,
     // spawn after 2.5s idle). Files were flushed before every spawn.
     self.poll_check();
+    // Run pills and pipeline (build, launch, output, stop).
+    self.poll_run_request();
+    self.poll_run();
     // Content search index follows the query (cached on change).
     self.recompute_search();
 
@@ -1247,8 +1538,17 @@ impl EditorUi {
     self.search.set_focused(focused);
     self.top_div.set_theme(palette.divider, dark);
     self.top_div.set_focused(focused);
-    self.run_stop.set_theme(theme.mode, theme.glass);
-    self.run_stop.set_focused(focused);
+    self.run_pill.set_theme(theme.mode, theme.glass);
+    self.run_pill.set_focused(focused);
+    self.run_pill.set_disabled(
+      !(self.run_controls_enabled() && matches!(self.run_phase(), RunPhase::Idle)),
+    );
+    self.stop_pill.set_theme(theme.mode, theme.glass);
+    self.stop_pill.set_focused(focused);
+    self.stop_pill.set_disabled(
+      !(self.run_controls_enabled()
+        && matches!(self.run_phase(), RunPhase::Building | RunPhase::Running | RunPhase::Stopping)),
+    );
     self.computer.set_theme(dark);
     self.computer.set_focused(focused);
     self.device.set_theme(palette.accent, dark);
@@ -1538,11 +1838,18 @@ impl EditorUi {
       36.0,
     );
     self.chev_fwd.draw(scene, fonts, images);
-    // Check status pill left of the performance pill: a glass body
-    // with the `check.indexing` label, only while a check runs.
+    // Status pill left of the performance pill: Building while the
+    // build runs, Running while the app runs, Indexing while a check
+    // runs (run states win over checks).
+    let status = match self.run_phase() {
+      RunPhase::Building => Some(lang::t("run.building")),
+      RunPhase::Running | RunPhase::Stopping => Some(lang::t("run.running")),
+      RunPhase::Idle => self.check_job.as_ref().map(|_| lang::t("check.indexing")),
+    };
     let (insp_w, _) = self.inspector.measure(fonts);
     let insp_x = content_x + content_w - SEARCH_PAD - insp_w;
-    if self.check_job.is_some() {
+    if let Some(text) = status {
+      self.check_text.set_text(text);
       let (text_w, text_h) = self.check_text.measure(fonts);
       let pad = 14.0;
       let pill_w = text_w + pad * 2.0;
@@ -1564,17 +1871,22 @@ impl EditorUi {
     self.top_div.place(fonts, content_x + SEARCH_PAD, viewport.y + 54.0, content_w - SEARCH_PAD * 2.0, 1.0);
     self.top_div.draw(scene, fonts, images);
     let col_w = self.sidebar.width_value();
-    // Dead Run/Stop pair at the sidebar top right edge, vertically
-    // centered on the traffic lights row like the old pills.
-    let (pill_w, _) = self.run_stop.measure(fonts);
-    self.run_stop.place(
+    // Run/Stop pills at the sidebar top right edge, vertically
+    // centered on the traffic lights row like the old pill: Run
+    // rightmost, Stop left of it.
+    let (run_w, _) = self.run_pill.measure(fonts);
+    let (stop_w, _) = self.stop_pill.measure(fonts);
+    let run_x = viewport.x + col_w - SEARCH_PAD - run_w;
+    self.run_pill.place(fonts, run_x, viewport.y + 12.5, run_w, 36.0);
+    self.run_pill.draw(scene, fonts, images);
+    self.stop_pill.place(
       fonts,
-      viewport.x + col_w - SEARCH_PAD - pill_w,
+      run_x - 8.0 - stop_w,
       viewport.y + 12.5,
-      pill_w,
+      stop_w,
       36.0,
     );
-    self.run_stop.draw(scene, fonts, images);
+    self.stop_pill.draw(scene, fonts, images);
     // Functionless search capsule pinned to the sidebar bottom:
     // small height, full column width even while resizing.
     self.search.place(
@@ -1614,6 +1926,7 @@ impl EditorUi {
     let command = self.command.take()?;
     if matches!(command, WindowCommand::Close) {
       self.save_all_now();
+      self.kill_run_now();
     }
     Some(command)
   }
@@ -1622,7 +1935,8 @@ impl EditorUi {
   /// and the menu react.
   pub fn hover(&mut self, x: f32, y: f32) {
     self.sidebar.set_hover(x, y);
-    self.run_stop.mouse_move(x, y);
+    self.run_pill.mouse_move(x, y);
+    self.stop_pill.mouse_move(x, y);
     self.device.mouse_move(x as f64, y as f64);
     self.chev_back.mouse_move(x, y);
     self.chev_fwd.mouse_move(x, y);
@@ -1669,7 +1983,8 @@ impl EditorUi {
       self.sidebar.mouse_down(x, y);
     }
     self.search.mouse_down(x, y);
-    self.run_stop.mouse_down(x, y);
+    self.run_pill.mouse_down(x, y);
+    self.stop_pill.mouse_down(x, y);
     self.device.mouse_down(x, y);
     self.chev_back.mouse_down(x, y);
     self.chev_fwd.mouse_down(x, y);
@@ -1687,9 +2002,9 @@ impl EditorUi {
 
   pub fn mouse_up(&mut self, x: f64, y: f64) {
     self.sidebar.mouse_up(x, y);
-    // No `on_action` on the pill pairs: the press tint releases into
-    // nothing, by design. The device menu keeps its example selection.
-    self.run_stop.mouse_up(x, y);
+    // The device menu keeps its example selection (display only).
+    self.run_pill.mouse_up(x, y);
+    self.stop_pill.mouse_up(x, y);
     self.device.mouse_up(x, y);
     self.chev_back.mouse_up(x, y);
     self.chev_fwd.mouse_up(x, y);
@@ -1770,7 +2085,8 @@ impl EditorUi {
     self.sidebar.set_focused(focused);
     self.search.set_focused(focused);
     self.top_div.set_focused(focused);
-    self.run_stop.set_focused(focused);
+    self.run_pill.set_focused(focused);
+    self.stop_pill.set_focused(focused);
     self.device.set_focused(focused);
     self.menu_glass.set_focused(focused);
     self.chev_back.set_focused(focused);
@@ -2182,6 +2498,209 @@ mod tests {
   fn open_rejects_missing_dir() {
     let missing = std::path::Path::new("/definitely/not/here-xcode");
     assert!(EditorUi::open("x", missing).is_err());
+  }
+
+  fn scaffold_ui(tag: &str) -> (EditorUi, std::path::PathBuf, std::path::PathBuf) {
+    let parent = std::env::temp_dir()
+      .join(format!("xcode-runui-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&parent);
+    std::fs::create_dir_all(&parent).unwrap();
+    let root = crate::scaffold::create_project(&parent, "My App", "", "1.0", "de.x")
+      .expect("scaffold");
+    let ui = EditorUi::open("My App", &root).expect("open");
+    (ui, parent, root)
+  }
+
+  #[test]
+  fn run_controls_follow_device_and_manifest() {
+    let code = example_code("testApp", "test", "arlo");
+    let fallback = EditorUi::new("test", code);
+    assert!(!fallback.run_controls_enabled());
+    let (mut ui, parent, _root) = scaffold_ui("gating");
+    // Unset means My Computer.
+    assert!(ui.run_controls_enabled());
+    ui.device_sel.set(Some(1));
+    assert!(ui.run_controls_enabled());
+    for other in [0usize, 2, 3, 4, 5, 6, 7, 8] {
+      ui.device_sel.set(Some(other));
+      assert!(!ui.run_controls_enabled(), "device {other}");
+    }
+    let _ = std::fs::remove_dir_all(&parent);
+  }
+
+  #[test]
+  fn press_run_ignores_wrong_device_or_busy() {
+    let (mut ui, parent, _root) = scaffold_ui("guard");
+    ui.device_sel.set(Some(4));
+    ui.press_run();
+    assert!(ui.build_job.is_none());
+    ui.device_sel.set(None);
+    // Fake busy build without a thread: never replaced.
+    let (_tx, rx) = std::sync::mpsc::channel();
+    ui.build_job = Some(BuildJob {
+      rx,
+      cancel: Arc::new(AtomicBool::new(false)),
+      child: Arc::new(Mutex::new(None)),
+    });
+    ui.press_run();
+    assert!(ui.build_job.is_some());
+    let _ = std::fs::remove_dir_all(&parent);
+  }
+
+  #[test]
+  fn build_failure_shows_errors_in_logs() {
+    use crate::run::BuildResult;
+    let (mut ui, parent, _root) = scaffold_ui("fail");
+    let (tx, rx) = std::sync::mpsc::channel();
+    ui.build_job = Some(BuildJob {
+      rx,
+      cancel: Arc::new(AtomicBool::new(false)),
+      child: Arc::new(Mutex::new(None)),
+    });
+    tx.send(BuildResult {
+      success: false,
+      errors: vec!["error: boom\n --> here".to_string()],
+      binary: None,
+    })
+    .expect("send");
+    ui.poll_run();
+    assert!(ui.build_job.is_none());
+    assert!(ui.active_run.is_none());
+    assert_eq!(ui.run_phase(), RunPhase::Idle);
+    let page = ui.sidebar.page_mut(ui.sidebar.selected_index()).expect("page");
+    let ed = page
+      .as_any_mut()
+      .downcast_mut::<CodeEditor>()
+      .expect("code page");
+    assert!(ed.log_lines().iter().any(|line| line.contains("error: boom")));
+    let _ = std::fs::remove_dir_all(&parent);
+  }
+
+  #[test]
+  fn build_success_without_binary_logs_note() {
+    use crate::run::BuildResult;
+    let (mut ui, parent, _root) = scaffold_ui("nobin");
+    let (tx, rx) = std::sync::mpsc::channel();
+    ui.build_job = Some(BuildJob {
+      rx,
+      cancel: Arc::new(AtomicBool::new(false)),
+      child: Arc::new(Mutex::new(None)),
+    });
+    tx.send(BuildResult { success: true, errors: Vec::new(), binary: None }).expect("send");
+    ui.poll_run();
+    assert!(ui.active_run.is_none());
+    let page = ui.sidebar.page_mut(ui.sidebar.selected_index()).expect("page");
+    let ed = page
+      .as_any_mut()
+      .downcast_mut::<CodeEditor>()
+      .expect("code page");
+    assert!(ed.log_lines().iter().any(|line| line.contains("binary")));
+    let _ = std::fs::remove_dir_all(&parent);
+  }
+
+  fn spawn_run_process(ui: &mut EditorUi, program: &str, arg: &str) {
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(program)
+      .arg(arg)
+      .stdout(Stdio::piped())
+      .stderr(Stdio::piped())
+      .spawn()
+      .expect("spawn helper");
+    let (tx, rx) = std::sync::mpsc::channel();
+    if let Some(out) = child.stdout.take() {
+      spawn_line_reader(out, tx.clone());
+    }
+    if let Some(err) = child.stderr.take() {
+      spawn_line_reader(err, tx.clone());
+    }
+    let pid = child.id();
+    ui.active_run = Some(ActiveRun {
+      child,
+      debugger: Debugger::attach(pid),
+      rx,
+      stop_sent_at: None,
+      last_sample: Instant::now(),
+    });
+  }
+
+  #[test]
+  fn running_app_streams_lines_and_exits() {
+    let (mut ui, parent, _root) = scaffold_ui("stream");
+    spawn_run_process(&mut ui, "/bin/echo", "hello-run");
+    assert_eq!(ui.run_phase(), RunPhase::Running);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    ui.poll_run();
+    ui.poll_run();
+    assert!(ui.active_run.is_none());
+    assert_eq!(ui.run_phase(), RunPhase::Idle);
+    let page = ui.sidebar.page_mut(ui.sidebar.selected_index()).expect("page");
+    let ed = page
+      .as_any_mut()
+      .downcast_mut::<CodeEditor>()
+      .expect("code page");
+    assert!(ed.log_lines().iter().any(|line| line.contains("hello-run")));
+    let _ = std::fs::remove_dir_all(&parent);
+  }
+
+  #[test]
+  fn stop_terms_and_reaps() {
+    let (mut ui, parent, _root) = scaffold_ui("term");
+    spawn_run_process(&mut ui, "/bin/sleep", "30");
+    assert_eq!(ui.run_phase(), RunPhase::Running);
+    ui.press_stop();
+    assert_eq!(ui.run_phase(), RunPhase::Stopping);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    ui.poll_run();
+    ui.poll_run();
+    assert!(ui.active_run.is_none());
+    assert_eq!(ui.run_phase(), RunPhase::Idle);
+    let _ = std::fs::remove_dir_all(&parent);
+  }
+
+  #[test]
+  fn stop_escalates_after_grace() {
+    let (mut ui, parent, _root) = scaffold_ui("escalate");
+    spawn_run_process(&mut ui, "/bin/sleep", "30");
+    // Pretend SIGTERM went out long ago: the next poll force-kills.
+    if let Some(run) = ui.active_run.as_mut() {
+      run.stop_sent_at = Some(Instant::now() - STOP_GRACE - std::time::Duration::from_secs(1));
+    }
+    ui.poll_run();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    ui.poll_run();
+    assert!(ui.active_run.is_none());
+    assert_eq!(ui.run_phase(), RunPhase::Idle);
+    let _ = std::fs::remove_dir_all(&parent);
+  }
+
+  #[test]
+  fn sampling_feeds_perf_panel() {
+    let (mut ui, parent, _root) = scaffold_ui("sample");
+    spawn_run_process(&mut ui, "/bin/sleep", "3");
+    if let Some(run) = ui.active_run.as_mut() {
+      run.last_sample = Instant::now() - SAMPLE_EVERY - std::time::Duration::from_secs(1);
+    }
+    ui.poll_run();
+    let page = ui.sidebar.page_mut(ui.sidebar.selected_index()).expect("page");
+    let ed = page
+      .as_any_mut()
+      .downcast_mut::<CodeEditor>()
+      .expect("code page");
+    assert!(ed.sample_count() >= 1);
+    assert!(ui.active_run.is_some());
+    ui.kill_run_now();
+    let _ = std::fs::remove_dir_all(&parent);
+  }
+
+  #[test]
+  fn close_kills_running_app() {
+    let (mut ui, parent, _root) = scaffold_ui("kill");
+    spawn_run_process(&mut ui, "/bin/sleep", "30");
+    assert!(ui.active_run.is_some());
+    ui.kill_run_now();
+    assert!(ui.active_run.is_none());
+    assert!(ui.build_job.is_none());
+    let _ = std::fs::remove_dir_all(&parent);
   }
 
   #[test]
