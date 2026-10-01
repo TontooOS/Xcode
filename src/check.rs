@@ -380,7 +380,7 @@ mod tests {
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::write(
       dir.join("Cargo.toml"),
-      "[package]\nname = \"hello\"\nversion = \"27.0.0\"\nedition = \"2021\"\n",
+      "[package]\nname = \"xcodecheckfix\"\nversion = \"27.0.0\"\nedition = \"2021\"\n",
     )
     .unwrap();
     std::fs::write(dir.join("src").join("main.rs"), "mod app;\n\nfn main() {}\n").unwrap();
