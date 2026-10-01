@@ -39,18 +39,28 @@ pub struct BuildResult {
   pub binary: Option<PathBuf>,
 }
 
-/// What to build: the project root, an optional pre-clean and an
+/// What to build: the project root, an optional pre-clean, an
 /// optional isolated target dir (tests isolate parallel fixture
-/// builds; the app always uses the cargo default).
+/// builds; the app always uses the cargo default) and whether the
+/// human build output streams live (build-only devices show it,
+/// Run keeps it hidden until launch).
 pub struct BuildRequest {
   pub root: PathBuf,
   pub clean_first: bool,
   pub target_dir: Option<PathBuf>,
+  pub stream_output: bool,
+}
+
+/// One build event: live output lines while running, one result at
+/// the end.
+pub enum BuildEvent {
+  Line(String),
+  Finished(BuildResult),
 }
 
 /// One running `cargo build` (same single-job shape as the check).
 pub struct BuildJob {
-  pub rx: std::sync::mpsc::Receiver<BuildResult>,
+  pub rx: std::sync::mpsc::Receiver<BuildEvent>,
   pub cancel: Arc<AtomicBool>,
   pub child: Arc<Mutex<Option<Child>>>,
 }
@@ -61,21 +71,23 @@ pub enum RunEvent {
 }
 
 /// Spawn the background build: optional `cargo clean` first, then
-/// `cargo build`, collecting rendered errors, resolving the binary
-/// on success and sending one result. Stops early (killing the
-/// child) once `cancel` flips.
+/// either a human `cargo build` streaming live lines (build-only) or
+/// a JSON build collecting rendered errors (Run keeps build logs
+/// hidden). Resolves the binary on success and sends one result.
+/// Stops early (killing the child) once `cancel` flips.
 pub fn spawn_build(
   request: BuildRequest,
   cancel: Arc<AtomicBool>,
   child_slot: Arc<Mutex<Option<Child>>>,
-  tx: std::sync::mpsc::Sender<BuildResult>,
+  tx: std::sync::mpsc::Sender<BuildEvent>,
 ) {
   thread::spawn(move || {
     let manifest = request.root.join("Cargo.toml");
     eprintln!(
-      "[xcode-run] build root={} clean={}",
+      "[xcode-run] build root={} clean={} stream={}",
       request.root.display(),
-      request.clean_first
+      request.clean_first,
+      request.stream_output
     );
     if request.clean_first {
       if !run_clean(&manifest, &request, &cancel, &child_slot) {
@@ -85,60 +97,153 @@ pub fn spawn_build(
         return;
       }
     }
-    let mut build = Command::new(cargo_program());
-    build
-      .arg("build")
-      .arg("--message-format=json")
-      .arg("--color=never")
-      .arg("--manifest-path")
-      .arg(&manifest)
-      .current_dir(&request.root)
-      .stdout(Stdio::piped())
-      .stderr(Stdio::null());
-    if let Some(dir) = &request.target_dir {
-      build.env("CARGO_TARGET_DIR", dir);
+    if request.stream_output {
+      run_human_build(&manifest, &request, &cancel, &child_slot, &tx);
+    } else {
+      run_json_build(&manifest, &request, &cancel, &child_slot, &tx);
     }
-    let child = build.spawn();
-    let mut child = match child {
-      Ok(child) => child,
-      Err(err) => {
-        eprintln!("[xcode-run] build spawn failed: {err}");
-        return;
-      }
-    };
-    let stdout = child.stdout.take();
-    if let Ok(mut slot) = child_slot.lock() {
-      *slot = Some(child);
-    }
-    let mut errors = Vec::new();
-    if let Some(out) = stdout {
-      for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
-        if cancel.load(Ordering::Relaxed) {
-          kill_slot(&child_slot);
-          return;
-        }
-        if errors.len() < MAX_BUILD_ERRORS {
-          if let Some(rendered) = error_rendered(&line) {
-            errors.push(rendered);
-          }
-        }
-      }
-    }
-    let success = match child_slot.lock().ok().and_then(|mut slot| slot.take()) {
-      Some(mut child) => child.wait().map(|status| status.success()).unwrap_or(false),
-      None => false,
-    };
-    if cancel.load(Ordering::Relaxed) {
+  });
+}
+
+/// Human `cargo build` with live output lines for build-only devices.
+fn run_human_build(
+  manifest: &Path,
+  request: &BuildRequest,
+  cancel: &Arc<AtomicBool>,
+  child_slot: &Arc<Mutex<Option<Child>>>,
+  tx: &std::sync::mpsc::Sender<BuildEvent>,
+) {
+  let mut build = Command::new(cargo_program());
+  build
+    .arg("build")
+    .arg("--color=never")
+    .arg("--manifest-path")
+    .arg(manifest)
+    .current_dir(&request.root)
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+  if let Some(dir) = &request.target_dir {
+    build.env("CARGO_TARGET_DIR", dir);
+  }
+  let mut child = match build.spawn() {
+    Ok(child) => child,
+    Err(err) => {
+      eprintln!("[xcode-run] build spawn failed: {err}");
       return;
     }
-    let binary = if success {
-      binary_for_manifest(&manifest, request.target_dir.as_deref())
-    } else {
-      None
-    };
-    eprintln!("[xcode-run] build done success={success}");
-    let _ = tx.send(BuildResult { success, errors, binary });
-  });
+  };
+  let (lines_tx, lines_rx) = std::sync::mpsc::channel();
+  if let Some(out) = child.stdout.take() {
+    let sender = lines_tx.clone();
+    thread::spawn(move || {
+      for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
+        if sender.send(line).is_err() {
+          break;
+        }
+      }
+    });
+  }
+  if let Some(err) = child.stderr.take() {
+    let sender = lines_tx.clone();
+    thread::spawn(move || {
+      for line in std::io::BufReader::new(err).lines().map_while(Result::ok) {
+        if sender.send(line).is_err() {
+          break;
+        }
+      }
+    });
+  }
+  drop(lines_tx);
+  if let Ok(mut slot) = child_slot.lock() {
+    *slot = Some(child);
+  }
+  for line in lines_rx {
+    if cancel.load(Ordering::Relaxed) {
+      kill_slot(child_slot);
+      return;
+    }
+    if tx.send(BuildEvent::Line(line)).is_err() {
+      kill_slot(child_slot);
+      return;
+    }
+  }
+  let success = match child_slot.lock().ok().and_then(|mut slot| slot.take()) {
+    Some(mut child) => child.wait().map(|status| status.success()).unwrap_or(false),
+    None => false,
+  };
+  if cancel.load(Ordering::Relaxed) {
+    return;
+  }
+  let binary = if success {
+    binary_for_manifest(manifest, request.target_dir.as_deref())
+  } else {
+    None
+  };
+  eprintln!("[xcode-run] build done success={success}");
+  let _ = tx.send(BuildEvent::Finished(BuildResult { success, errors: Vec::new(), binary }));
+}
+
+/// JSON `cargo build` collecting rendered errors for Run (build logs
+/// stay hidden until launch).
+fn run_json_build(
+  manifest: &Path,
+  request: &BuildRequest,
+  cancel: &Arc<AtomicBool>,
+  child_slot: &Arc<Mutex<Option<Child>>>,
+  tx: &std::sync::mpsc::Sender<BuildEvent>,
+) {
+  let mut build = Command::new(cargo_program());
+  build
+    .arg("build")
+    .arg("--message-format=json")
+    .arg("--color=never")
+    .arg("--manifest-path")
+    .arg(manifest)
+    .current_dir(&request.root)
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null());
+  if let Some(dir) = &request.target_dir {
+    build.env("CARGO_TARGET_DIR", dir);
+  }
+  let mut child = match build.spawn() {
+    Ok(child) => child,
+    Err(err) => {
+      eprintln!("[xcode-run] build spawn failed: {err}");
+      return;
+    }
+  };
+  let stdout = child.stdout.take();
+  if let Ok(mut slot) = child_slot.lock() {
+    *slot = Some(child);
+  }
+  let mut errors = Vec::new();
+  if let Some(out) = stdout {
+    for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
+      if cancel.load(Ordering::Relaxed) {
+        kill_slot(child_slot);
+        return;
+      }
+      if errors.len() < MAX_BUILD_ERRORS {
+        if let Some(rendered) = error_rendered(&line) {
+          errors.push(rendered);
+        }
+      }
+    }
+  }
+  let success = match child_slot.lock().ok().and_then(|mut slot| slot.take()) {
+    Some(mut child) => child.wait().map(|status| status.success()).unwrap_or(false),
+    None => false,
+  };
+  if cancel.load(Ordering::Relaxed) {
+    return;
+  }
+  let binary = if success {
+    binary_for_manifest(manifest, request.target_dir.as_deref())
+  } else {
+    None
+  };
+  eprintln!("[xcode-run] build done success={success}");
+  let _ = tx.send(BuildEvent::Finished(BuildResult { success, errors, binary }));
 }
 
 /// Run `cargo clean` for the manifest (production builds start
@@ -353,10 +458,28 @@ mod tests {
   }
 
   fn build_request(dir: &PathBuf, clean_first: bool) -> BuildRequest {
+    build_request_stream(dir, clean_first, false)
+  }
+
+  fn build_request_stream(dir: &PathBuf, clean_first: bool, stream_output: bool) -> BuildRequest {
     BuildRequest {
       root: dir.clone(),
       clean_first,
       target_dir: Some(dir.join("target")),
+      stream_output,
+    }
+  }
+
+  fn recv_result(rx: std::sync::mpsc::Receiver<BuildEvent>) -> BuildResult {
+    let deadline = std::time::Instant::now() + Duration::from_secs(180);
+    loop {
+      match rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(BuildEvent::Finished(result)) => return result,
+        Ok(BuildEvent::Line(_)) => {}
+        Err(_) => {
+          assert!(std::time::Instant::now() < deadline, "build timed out");
+        }
+      }
     }
   }
 
@@ -380,7 +503,7 @@ mod tests {
       Arc::new(Mutex::new(None)),
       tx,
     );
-    let result = rx.recv_timeout(Duration::from_secs(180)).expect("build");
+    let result = recv_result(rx);
     assert!(result.success);
     assert!(result.errors.is_empty());
     assert!(result.binary.is_some());
@@ -397,10 +520,37 @@ mod tests {
       Arc::new(Mutex::new(None)),
       tx,
     );
-    let result = rx.recv_timeout(Duration::from_secs(180)).expect("build");
+    let result = recv_result(rx);
     assert!(!result.success);
     assert!(!result.errors.is_empty());
     assert!(result.binary.is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  #[test]
+  fn streamed_build_shows_live_lines() {
+    let dir = fixture("stream", "pub fn x() {}\n");
+    let (tx, rx) = std::sync::mpsc::channel();
+    spawn_build(
+      build_request_stream(&dir, false, true),
+      Arc::new(AtomicBool::new(false)),
+      Arc::new(Mutex::new(None)),
+      tx,
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(180);
+    let mut lines = Vec::new();
+    let result = loop {
+      match rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(BuildEvent::Line(line)) => lines.push(line),
+        Ok(BuildEvent::Finished(result)) => break result,
+        Err(_) => {
+          assert!(std::time::Instant::now() < deadline, "build timed out");
+        }
+      }
+    };
+    assert!(result.success);
+    assert!(!lines.is_empty());
+    assert!(lines.iter().any(|line| line.contains("Compiling") || line.contains("Finished")));
     let _ = std::fs::remove_dir_all(&dir);
   }
 
@@ -414,7 +564,7 @@ mod tests {
       Arc::new(Mutex::new(None)),
       tx,
     );
-    let result = rx.recv_timeout(Duration::from_secs(180)).expect("build");
+    let result = recv_result(rx);
     assert!(result.success);
     assert!(result.binary.is_some());
     let _ = std::fs::remove_dir_all(&dir);

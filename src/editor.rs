@@ -31,8 +31,8 @@ use crate::check::{
 use crate::code_editor::{CodeEditor, example_rust_code};
 use crate::debug::{Debugger, SAMPLE_EVERY};
 use crate::run::{
-  STOP_GRACE, BuildJob, BuildRequest, BuildResult, RunEvent, force_kill, signal_term, spawn_build,
-  spawn_line_reader,
+  STOP_GRACE, BuildEvent, BuildJob, BuildRequest, BuildResult, RunEvent, force_kill, signal_term,
+  spawn_build, spawn_line_reader,
 };
 use crate::project_files::{FileEntry, list_project_files, load_file_text};
 use crate::TontooUI::elements::{
@@ -1142,7 +1142,7 @@ impl EditorUi {
     let child = Arc::new(Mutex::new(None));
     let (tx, rx) = std::sync::mpsc::channel();
     spawn_build(
-      BuildRequest { root, clean_first: clean, target_dir: None },
+      BuildRequest { root, clean_first: clean, target_dir: None, stream_output: !launch },
       cancel.clone(),
       child.clone(),
       tx,
@@ -1246,16 +1246,33 @@ impl EditorUi {
   }
 
   /// Run pipeline pump, called every frame: reaps finished builds
-  /// (launch or show errors), drains app output into the Logs panel,
-  /// reaps exits, escalates stops after 5s and samples the debugger.
+  /// (launch or show errors), drains live build and app output into
+  /// the Logs panel, reaps exits, escalates stops after 5s and
+  /// samples the debugger.
   fn poll_run(&mut self) {
     let mut built: Option<BuildResult> = None;
     let mut build_gone = false;
-    if let Some(job) = &self.build_job {
-      match job.rx.try_recv() {
-        Ok(result) => built = Some(result),
-        Err(TryRecvError::Empty) => {}
-        Err(TryRecvError::Disconnected) => build_gone = true,
+    if self.build_job.is_some() {
+      for _ in 0..500 {
+        let event = match self.build_job.as_ref() {
+          Some(job) => match job.rx.try_recv() {
+            Ok(event) => Some(event),
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => {
+              build_gone = true;
+              None
+            }
+          },
+          None => None,
+        };
+        match event {
+          Some(BuildEvent::Line(line)) => self.push_run_log(&line),
+          Some(BuildEvent::Finished(result)) => {
+            built = Some(result);
+            break;
+          }
+          None => break,
+        }
       }
     }
     if let Some(result) = built {
@@ -2611,11 +2628,11 @@ mod tests {
       cancel: Arc::new(AtomicBool::new(false)),
       child: Arc::new(Mutex::new(None)),
     });
-    tx.send(BuildResult {
+    tx.send(BuildEvent::Finished(BuildResult {
       success: false,
       errors: vec!["error: boom\n --> here".to_string()],
       binary: None,
-    })
+    }))
     .expect("send");
     ui.poll_run();
     assert!(ui.build_job.is_none());
@@ -2641,7 +2658,12 @@ mod tests {
       child: Arc::new(Mutex::new(None)),
     });
     ui.build_launch = false;
-    tx.send(BuildResult { success: true, errors: Vec::new(), binary: None }).expect("send");
+    tx.send(BuildEvent::Finished(BuildResult {
+      success: true,
+      errors: Vec::new(),
+      binary: None,
+    }))
+    .expect("send");
     ui.poll_run();
     assert!(ui.build_job.is_none());
     assert!(ui.active_run.is_none());
@@ -2666,11 +2688,11 @@ mod tests {
       child: Arc::new(Mutex::new(None)),
     });
     ui.build_launch = true;
-    tx.send(BuildResult {
+    tx.send(BuildEvent::Finished(BuildResult {
       success: true,
       errors: Vec::new(),
       binary: Some(std::path::PathBuf::from("/bin/true")),
-    })
+    }))
     .expect("send");
     ui.poll_run();
     assert!(ui.build_job.is_none());
@@ -2679,6 +2701,37 @@ mod tests {
     ui.poll_run();
     assert!(ui.active_run.is_none());
     assert_eq!(ui.run_phase(), RunPhase::Idle);
+    let _ = std::fs::remove_dir_all(&parent);
+  }
+
+  #[test]
+  fn streamed_build_lines_land_in_logs() {
+    use crate::run::BuildResult;
+    let (mut ui, parent, _root) = scaffold_ui("lines");
+    let (tx, rx) = std::sync::mpsc::channel();
+    ui.build_job = Some(BuildJob {
+      rx,
+      cancel: Arc::new(AtomicBool::new(false)),
+      child: Arc::new(Mutex::new(None)),
+    });
+    ui.build_launch = false;
+    tx.send(BuildEvent::Line("   Compiling hello".to_string())).expect("send");
+    tx.send(BuildEvent::Line("    Finished dev".to_string())).expect("send");
+    tx.send(BuildEvent::Finished(BuildResult {
+      success: true,
+      errors: Vec::new(),
+      binary: None,
+    }))
+    .expect("send");
+    ui.poll_run();
+    assert!(ui.build_job.is_none());
+    let page = ui.sidebar.page_mut(ui.sidebar.selected_index()).expect("page");
+    let ed = page
+      .as_any_mut()
+      .downcast_mut::<CodeEditor>()
+      .expect("code page");
+    assert!(ed.log_lines().iter().any(|line| line.contains("Compiling hello")));
+    assert!(ed.log_lines().iter().any(|line| line.contains("Finished dev")));
     let _ = std::fs::remove_dir_all(&parent);
   }
 
@@ -2693,7 +2746,12 @@ mod tests {
       child: Arc::new(Mutex::new(None)),
     });
     ui.build_launch = true;
-    tx.send(BuildResult { success: true, errors: Vec::new(), binary: None }).expect("send");
+    tx.send(BuildEvent::Finished(BuildResult {
+      success: true,
+      errors: Vec::new(),
+      binary: None,
+    }))
+    .expect("send");
     ui.poll_run();
     assert!(ui.active_run.is_none());
     let page = ui.sidebar.page_mut(ui.sidebar.selected_index()).expect("page");

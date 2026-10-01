@@ -96,4 +96,5 @@ See [StartPage.md](StartPage.md) for details.
 - 2026-09-30: Working back/forward chevrons (two round pills stepping through the visit history, greyed out at the history ends).
 - 2026-09-30: Working Run button on My Computer (background `cargo build` with `Building...` pill and hidden build logs, real app launch with live Logs plus `Running...` pill, self-built `/proc` debugger feeding CPU/RAM/Disk stats, Stop with `SIGTERM` plus force-kill after 5s, both pills greyed out otherwise).
 - 2026-09-30: Build devices (Development builds only, Production cleans first and builds only, Export stays dead, `Build succeeded` confirmation, isolated target dirs for parallel test builds).
+- 2026-09-30: Live build logs for build-only devices (human cargo output streams into Logs while building).
 - 2026-09-30: Nested outline file tree (`BasicOutlineGroup`, trailing chevrons, type icons, remembered state, animated) replacing the flat rows; outline clicks land on flat pages, warning jumps expand ancestors.

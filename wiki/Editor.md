@@ -192,7 +192,10 @@ next to `XCODE_PROJECT_NAME`).
   (`run_kind`): My Computer builds and launches (`RunKind::Full`),
   Development builds only and Production cleans first and builds
   only (`RunKind::Build`, clean via `cargo clean`); anything else
-  (e.g. Export) does nothing. Build-only success pushes the
+  (e.g. Export) does nothing. Build-only devices stream the human
+  build output live into Logs (`BuildEvent::Line` from both cargo
+  streams, `run_human_build`); Run builds JSON-quiet and only shows
+  rendered compiler errors on failure. Build-only success pushes the
   localized `run.build_ok` line. On success the built binary resolves via
   `cargo metadata` (`binary_for_manifest`) and launches directly
   with piped output streaming line by line into every page's Logs
